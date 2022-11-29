@@ -1,0 +1,7 @@
+rules: ['setup', 'seekparentf90', 'condense']
+
+seekparentf90_path: "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/source_functions/seekparentf90"
+
+geno_prefix: "data/raw_data/geno_dump/200924_HairShed.850K"
+
+seektype: "2"

@@ -1,0 +1,19 @@
+rules: ['pheno_file', 'grm_keep', 'gcta_grm', 'mlma']
+
+gcta_path: "source_functions/gcta_1.93.2beta/gcta64"
+
+mpi_module: "openmpi/openmpi-3.1.3-intel-16.0.2"
+
+r_module: "r/r-4.0.0-gcc-10.1.0"
+
+plink_module: "plink/plink-1.90b"
+
+plink_nt: 12
+
+geno_prefix: "data/raw_data/geno_dump/200924_HairShed.850K"
+
+grm_prefix: "data/derived_data/grm_inbreeding/mizzou_hairshed"
+
+mlma_threads: 24
+
+year: ['2016', '2017', '2018', '2019']

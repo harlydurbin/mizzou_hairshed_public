@@ -1,0 +1,462 @@
+---
+author: "Harly Durbin"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    df_print: paged
+    code_folding: hide
+params:
+  model: "fixed15"
+  keyword: "PC-adjusted"
+  hair_col: 5
+  effect_num: 4
+title: "`r glue::glue('Estimation of bias ({params$keyword} dataset)')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, cols.print = 6)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(glue)
+library(purrr)
+library(ggplot2)
+library(tidylog)
+
+source(here::here("source_functions/bias_functions.R"))
+source(here::here("source_functions/melt_aireml.R"))
+source(here::here("source_functions/calculate_heritability.R"))
+
+model <- params$model
+keyword <- params$keyword
+```
+
+# Notes & questions
+
+![](../data/raw_data/bias_stats.png)
+
+# Setup
+
+```{r, message=FALSE, warning=FALSE}
+bias <-
+  c(1:10) %>% 
+  purrr::map(~ read_bias(iter = .x, model = model, hair_col = params$hair_col, effect_num = params$effect_num)) %>% 
+  reduce(bind_rows) %>% 
+  mutate(iter = forcats::fct_inorder(as.factor(iter)))
+```
+
+# Sanity check: heritability and repeatability across iterations
+
+```{r, rows.print = 11}
+# This is a lazy way to change stuff for the PC-adjusted model and I don't care
+varcov <-
+  if(params$effect_num == 4) {
+    purrr::map_dfr(.x = c(1:10),
+                   ~ melt_aireml(path = here::here(glue("data/derived_data/estimate_bias/{model}/{.x}/airemlf90.{model}.{.x}.log")),
+                                 effect4 = c("hair_dir"),
+                                 effect5 = c("hair_pe"),
+                                 resids = c("hair_res")) %>% 
+                     univ_heritability(abbrv = "hair",
+                                       desc = as.character(.x),
+                                       pe = TRUE)) %>%
+      bind_rows(melt_aireml(path = here::here(glue("data/derived_data/aireml_varcomp/{model}/airemlf90.{model}.log")),
+                            effect4 = c("hair_dir"),
+                            effect5 = c("hair_pe"),
+                            resids = c("hair_res")) %>% 
+                univ_heritability(abbrv = "hair",
+                                  desc = "Full dataset",
+                                  pe = TRUE))
+    } else if(params$effect_num == 2) {
+      purrr::map_dfr(.x = c(1:10),
+                     ~ melt_aireml(path = here::here(glue("data/derived_data/estimate_bias/{model}/{.x}/airemlf90.{model}.{.x}.log")),
+                                   effect2 = c("hair_dir"),
+                                   effect3 = c("hair_pe"),
+                                   resids = c("hair_res")) %>% 
+                       univ_heritability(abbrv = "hair",
+                                         desc = as.character(.x),
+                                         pe = TRUE)) %>%
+        bind_rows(melt_aireml(path = here::here(glue("data/derived_data/aireml_varcomp/{model}/airemlf90.{model}.log")),
+                              effect2 = c("hair_dir"),
+                              effect3 = c("hair_pe"),
+                              resids = c("hair_res")) %>% 
+                  univ_heritability(abbrv = "hair",
+                                    desc = "Full dataset",
+                                    pe = TRUE))  
+      }
+```
+
+```{r, rows.print = 11}
+varcov
+```
+
+# Bias: difference between reduced and full breeding values ($\mu_p - \mu_w$; $d_{p,w}$) {.tabset}
+
+* Expectation is 0
+* Should be calculated within all animals in pedigree
+
+## Summarized within iteration
+
+```{r, fig.width= 12, fig.height= 6}
+bias %>% 
+  mutate(difference = abs(solution_full - solution_reduced),
+         group = str_to_sentence(group)) %>% 
+  ggplot(aes(x = difference)) +
+  geom_density(aes(fill = group),
+               alpha = 0.7) +
+  theme_classic() +
+  theme(legend.text = element_text(size = 18),
+        axis.title = element_text(size = 24),
+        axis.title.y = element_text(margin = margin(t = 0,
+                                                    r = 13,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.title.x = element_text(margin = margin(t = 13,
+                                                    r = 0,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.text = element_text(size = 18),
+        axis.text.x = element_text(angle = 45,
+                                   hjust = 1),
+        strip.text = element_text(size = 18),
+        plot.title = element_text(size = 28,
+                                  margin = margin(t = 0,
+                                                  r = 0,
+                                                  b = 16,
+                                                  l = 0))) +
+  labs(x = "Full breeding value - reduced breeding value",
+       y = "Kernel density",
+       fill = NULL,
+       title = glue("{keyword} dataset")) +
+  facet_wrap(~ iter,
+             nrow = 2)
+```
+
+```{r}
+
+bias %>%
+  mutate(difference = abs(solution_reduced - solution_full)) %>%
+  group_by(iter) %>%
+  summarise(`Min. abs. difference` = min(difference, na.rm = TRUE),
+            `Mean abs. difference` = mean(difference, na.rm = TRUE),
+            `Max. abs. difference` = max(difference, na.rm = TRUE),
+            `SD abs. difference` = sd(difference, na.rm = TRUE)) %>% 
+  select(Iteration = iter, everything()) 
+  
+```
+
+## Summarized across all iterations 
+
+```{r}
+
+bias %>%
+  mutate(difference = abs(solution_reduced - solution_full)) %>%
+  summarise(`Min. abs. difference` = min(difference, na.rm = TRUE),
+            `Mean abs. difference` = mean(difference, na.rm = TRUE),
+            `Max. abs. difference` = max(difference, na.rm = TRUE),
+            `SD abs. difference` = sd(difference, na.rm = TRUE))
+```
+
+# Regress breeding values from full on breeding values from reduced
+
+```{r}
+purrr::map_dfr(.x = c(1:10),
+               ~ bias %>%
+                 filter(group == "dropped" & iter == .x) %>%
+                 lm(solution_full ~ solution_reduced,
+                    data = .) %>% 
+                 broom::tidy(),
+               .id = "Iteration") %>% 
+  filter(term == "solution_reduced") %>% 
+  mutate(Group = "Validation") %>% 
+  bind_rows(purrr::map_dfr(.x = c(1:10),
+                           ~ bias %>%
+                             filter(group == "kept" & iter == .x) %>%
+                             lm(solution_full ~ solution_reduced,
+                                data = .) %>% 
+                             broom::tidy(),
+                           .id = "Iteration") %>% 
+              filter(term == "solution_reduced") %>% 
+              mutate(Group = "Reference")) %>% 
+  select(Iteration, Group, Slope = estimate, SE = std.error) %>% 
+  arrange(Slope) %>% 
+  knitr::kable(escape = FALSE)
+```
+
+```{r}
+purrr::map_dfr(.x = c(1:10),
+               ~ bias %>%
+                 filter(group == "dropped" & iter == .x) %>%
+                 lm(solution_full ~ solution_reduced,
+                    data = .) %>% 
+                 broom::tidy(),
+               .id = "Iteration") %>% 
+  filter(term == "solution_reduced") %>% 
+  mutate(Group = "Validation") %>% 
+  bind_rows(purrr::map_dfr(.x = c(1:10),
+                           ~ bias %>%
+                             filter(group == "kept" & iter == .x) %>%
+                             lm(solution_full ~ solution_reduced,
+                                data = .) %>% 
+                             broom::tidy(),
+                           .id = "Iteration") %>% 
+              filter(term == "solution_reduced") %>% 
+              mutate(Group = "Reference")) %>% 
+  group_by(Group) %>% 
+  summarise(`Min. slope` = min(estimate),
+            `Mean slope` = mean(estimate),
+            `Max. slope` = max(estimate),
+            `SD slope` = sd(estimate)) %>% 
+  knitr::kable(escape = FALSE)
+```
+
+## Full model summary, within validation animals only (phenotype set to null; $b^v_{w,p}$) {.tabset}
+
+```{r}
+
+vallm <-
+  purrr::map(.x = c(1:10),
+             ~ bias %>%
+               filter(group == "dropped", iter == .x) %>%
+               lm(solution_full ~ solution_reduced, data = .) %>%
+               summary(.))
+```
+
+```{r, results='asis'}
+
+for (i in 1:length(vallm)){
+  cat("###", i, " \n\n", "```")
+  print(vallm[[i]])
+  cat("```", " \n\n")
+}
+
+```
+
+## Full model summary, within reference animals only ($b^r_{w,p}$) {.tabset}
+
+```{r}
+reflm <-
+  purrr::map(.x = c(1:10),
+             ~ bias %>%
+               filter(iter == .x & group == "kept") %>%
+               lm(solution_full ~ solution_reduced, data = .) %>%
+               summary(.))
+```
+
+```{r, results='asis'}
+
+for (i in 1:length(reflm)){
+  cat("###", i, " \n\n", "```")
+  print(reflm[[i]])
+  cat("```", " \n\n")
+}
+
+```
+
+# Distribution of breeding values (only validation animals; $b^v_{w,p}$) 
+
+* Regression of whole on partial breeding values ($b^v_{w,p}$) is interpreted as degree of dispersion
+    + Expectation is 1 absence of dispersion
+
+```{r, eval=FALSE}
+bias %>%
+  filter(group == "dropped") %>%
+  # Run lm and pull out slope/intercept for plotting
+  nest(-iter) %>%
+  mutate(lm = purrr::map(data, ~ lm(solution_full ~ solution_reduced, data = .x)),
+         tidied = purrr::map(lm, ~ broom::tidy(.x)),
+         modintercept = purrr::map_dbl(tidied,
+                                       ~ .[.$term == "(Intercept)", "estimate"] %>%
+                                         pull(estimate)),
+         modslope = purrr::map_dbl(tidied,
+                                   ~ .[.$term == "solution_reduced", "estimate"] %>%
+                                     pull(estimate))) %>%
+  select(Iteration = iter,
+         Slope = modslope,
+         Intercept = modintercept) 
+```
+
+```{r, fig.width=10, fig.height=16, eval=FALSE}
+bias %>%
+  filter(group == "dropped") %>%
+  # Run lm and pull out slope/intercept for plotting
+  nest(-iter) %>%
+  mutate(lm = purrr::map(data, ~ lm(solution_full ~ solution_reduced, data = .x)),
+         tidied = purrr::map(lm, ~ broom::tidy(.x)),
+         modintercept = purrr::map_dbl(tidied,
+                                       ~ .[.$term == "(Intercept)", "estimate"] %>%
+                                         pull(estimate)),
+         modslope = purrr::map_dbl(tidied,
+                                   ~ .[.$term == "solution_reduced", "estimate"] %>%
+                                     pull(estimate)),
+         slopelab = paste0("b^v[w,p]==", "'", sprintf("%.2f", signif(modslope, digits = 2)), "'")) %>%
+  select(-lm,-tidied) %>%
+  unnest(data) %>%
+  ggplot(aes(x = solution_reduced,
+             y = solution_full)) +
+  geom_hex(aes(fill = stat(count)),
+           bins = 40) +
+  viridis::scale_fill_viridis(option = "inferno",
+                              direction = 1,
+                              begin = 0.2,
+                              labels = scales::comma) +
+  geom_abline(slope = 1,
+              size = 1,
+              linetype = "twodash") +
+  geom_abline(aes(slope = modslope,
+                  intercept = modintercept),
+              size = 1,
+              color = "red") +
+  lims(x = c(-1.75, 1.75),
+       y = c(-1.75, 1.75)) +
+  theme_classic() +
+  theme(legend.title = element_text(size = 18),
+        legend.text = element_text(size = 14),
+        axis.title = element_text(size = 22),
+        axis.title.y = element_text(margin = margin(t = 0,
+                                                    r = 13,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.title.x = element_text(margin = margin(t = 13,
+                                                    r = 0,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.text = element_text(size = 16),
+        strip.text.x = element_text(size = 16),
+        plot.title = element_text(size = 26,
+                                  margin = margin(t = 0,
+                                                  r = 0,
+                                                  b = 16,
+                                                  l = 0))) +
+  # https://stackoverflow.com/questions/43104021/stop-parsing-out-zeros-after-decimals-in-ggplot2s-annotate
+  # https://stackoverflow.com/questions/15397789/keeping-trailing-zeroes-with-plotmath
+  geom_text(x = -1.4,
+            y = 1,
+            aes(label = slopelab),
+            size = 5.5,
+            parse = TRUE) +
+  labs(x = latex2exp::TeX("Whole breeding value ($\\hat{\\mu_w}$)"),
+       y = latex2exp::TeX("Partial breeding value ($\\hat{\\mu_p}$)"),
+       fill = "Count",
+       title = glue("{keyword} dataset")) +
+  facet_wrap( ~ iter,
+              nrow = 5,
+              ncol = 2)
+```
+
+```{r, fig.width=10, fig.height=16, eval=FALSE}
+
+ggsave(filename = here::here(glue("figures/estimate_bias/slope.{model}.tiff")), height = 16, width = 10)
+
+```
+
+# Correlations {.tabset}
+
+$$\rho_{p,w} = \frac{cov(\hat{\mu_p}, \hat{\mu_w})}{\sqrt{var(\hat{\mu_p})var(\hat{\mu_w})}}$$
+
+* $\rho^v_{w,p}$ is interpreted as ~~prediction accuracy~~ ratio of accuracies - measure of consistency between subsequent evaluations
+
+## Within iterations
+
+```{r}
+bias %>% 
+  filter(group == "dropped") %>% 
+  group_by(iter) %>% 
+  summarise(cor = cor(solution_full, solution_reduced, use = "pairwise.complete.obs")) %>% 
+  ungroup() %>% 
+  arrange(cor) %>% 
+  mutate(Group = "Validation") %>% 
+  select(Iteration = iter, Group, `$\\rho^{v}_{w, p}$` = cor) %>% 
+  knitr::kable(escape = FALSE)
+```
+
+```{r}
+bias %>% 
+  filter(group == "kept") %>% 
+  group_by(iter) %>% 
+  summarise(cor = cor(solution_full, solution_reduced, use = "pairwise.complete.obs")) %>% 
+  ungroup() %>% 
+  arrange(cor) %>% 
+  mutate(Group = "Reference") %>% 
+  select(Iteration = iter, Group, `$\\rho^{r}_{w, p}$` = cor) %>% 
+  knitr::kable(escape = FALSE)
+```
+
+## Across all iterations
+
+```{r}
+bias %>% 
+  filter(group == "dropped") %>% 
+  group_by(iter) %>% 
+  summarise(cor = cor(solution_full, solution_reduced, use = "pairwise.complete.obs")) %>% 
+  ungroup() %>% 
+  mutate(Group = "Validation") %>% 
+  bind_rows(bias %>% 
+              filter(group == "kept") %>% 
+              group_by(iter) %>% 
+              summarise(cor = cor(solution_full, solution_reduced, use = "pairwise.complete.obs")) %>% 
+              ungroup() %>% 
+              mutate(Group = "Reference")) %>% 
+  group_by(Group) %>% 
+  summarise(`Min. $\\rho_{w, p}$` = min(cor),
+            `Mean $\\rho_{w, p}$` = mean(cor),
+            `Max. $\\rho_{w, p}$` = max(cor),
+            `SD $\\rho_{w, p}$` = sd(cor)) %>% 
+  knitr::kable(escape = FALSE)
+```
+
+# Prediction accuracy ($\hat{acc}_{LR}$)
+
+$$\hat{acc}_{LR}=\sqrt{\frac{cov(\hat{u}_w, \hat{u}_p)}{(1-F)\hat{\sigma}^2_u}}$$
+
+```{r}
+
+pred_acc <-
+  bias %>% 
+  group_by(iter) %>% 
+  nest() %>% 
+  ungroup() %>% 
+  left_join(varcov %>% 
+              filter(key != "Full dataset") %>% 
+              mutate(gen_var = `Direct h2`*`Total variance`) %>% 
+              select(gen_var, iter = key)) %>% 
+  mutate(f = purrr::map2_dbl(.x = data,
+                             .y = iter,
+                             ~ .x %>% 
+                               filter(group == "dropped") %>% 
+                               left_join(read_table2(here::here(glue("data/derived_data/estimate_bias/{model}/{.y}/renf90.inb")),
+                                                     col_names = FALSE) %>% 
+                                           select(full_reg = X1, f = X2)) %>% 
+                               summarise(f = mean(f)) %>%
+                               pull(f)),
+         pred_acc = purrr::pmap_dbl(list(data, gen_var, f),
+                                    .f = lr_prediction_acc)) %>% 
+  select(-data)
+```
+
+## Within iterations
+
+```{r}
+pred_acc %>% 
+  arrange(pred_acc) %>% 
+  select(Iteration = iter,
+         `Prediction accuracy` = pred_acc) %>% 
+  knitr::kable(escape = FALSE)
+```
+
+## Across all iterations
+
+```{r}
+pred_acc %>% 
+  summarise(`Min. prediction acc.` = min(pred_acc),
+            `Mean prediction acc.` = mean(pred_acc),
+            `Max. prediction acc.` = max(pred_acc),
+            `SD prediction acc.` = sd(pred_acc)) %>% 
+  knitr::kable(escape = FALSE)
+```
+
+# Commentary

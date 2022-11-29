@@ -1,0 +1,176 @@
+---
+title: "Fixed effect BLUEs"
+author: "Harly Durbin"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(tidyr)
+library(stringr)
+library(dplyr)
+library(glue)
+library(ggplot2)
+library(magrittr)
+library(tidylog)
+
+source(here::here("source_functions/melt_aireml.R"))
+source(here::here("source_functions/parse_renf90table.R"))
+
+```
+
+# Notes & questions
+
+
+```{r}
+breed_key <- read_rds(here::here("data/derived_data/breed_key/breed_key.rds"))
+```
+
+# Setup 
+
+```{r, warning=FALSE, message=FALSE}
+cleaned <- read_rds(here::here("data/derived_data/import_join_clean/cleaned.rds"))
+```
+
+```{r, warning=FALSE, message=FALSE}
+full_ped <- read_rds(here::here("data/derived_data/3gen/full_ped.rds"))
+```
+
+## Age model
+
+```{r, warning=FALSE, message=FALSE}
+fixed16_sol <-
+  c(1, 2) %>% 
+  purrr::map_dfr(~ parse_renf90table(here::here("data/derived_data/aireml_varcomp/fixed16/renf90.tables"),
+                                     effect_num = .x,
+                                     effect_key = TRUE)) %>% 
+  mutate(effect = case_when(effect == 1 ~ "cg",
+                            effect == 2 ~ "age_group")) %>% 
+  right_join(read_table2(here::here("data/derived_data/aireml_varcomp/fixed16/solutions"),
+                         skip = 1,
+                         col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+               select(-trait) %>% 
+               filter(!effect %in% c(3, 4)) %>% 
+               mutate_at(vars("effect", "id_renamed"), ~ as.character(.)) %>% 
+               mutate(effect = case_when(effect == 1 ~ "cg",
+                                         effect == 2 ~ "age_group")))
+  
+  
+```
+
+# Age
+
+Supplementary Figure XXX. Best linear unbiased estimates for age in years fit as a categorical effect were used to determine age grouping in contemporary group definition. Records from very old animals aged 14-21 were combined to increase sample size. 
+
+```{r}
+fixed16_sol %>% 
+  filter(effect == "age_group") %>% 
+  mutate(id_original = if_else(id_original == "old", 14, as.numeric(id_original))) %>% 
+  arrange(id_original) %>% 
+  mutate(id_original = forcats::fct_inorder(as.factor(id_original)),
+         rel_sol = solution + 0.20198118,
+         clr = case_when(rel_sol > 0 ~"#0070C0",
+                         TRUE ~ "lightgrey")) %>% 
+  ggplot(aes(x = id_original,
+             #y = solution,
+             y = rel_sol,
+             fill = clr)) +
+  geom_bar(stat = "identity",
+           position = "identity") +
+  scale_fill_identity() +
+  geom_errorbar(aes(ymin = rel_sol - se,
+                    ymax = rel_sol + se)) +
+  theme_classic() +
+  scale_x_discrete(labels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14+")) +
+  theme(plot.title = element_text(size = 22,
+                                  face = "italic",
+                                  margin = margin(t = 0,
+                                                  r = 0,
+                                                  b = 13,
+                                                  l = 0)),
+        axis.title = element_text(size = 22),
+        axis.title.y = element_text(margin = margin(t = 0,
+                                                    r = 10,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.title.x = element_text(margin = margin(t = 10,
+                                                    r = 0,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.text = element_text(size = 16),
+        legend.position = "none",
+        panel.background = element_rect(fill = "transparent",
+                                        colour = NA),
+        plot.background = element_rect(fill = "transparent",
+                                       colour = NA),
+        legend.background = element_rect(fill = "transparent",
+                                       colour = NA)) +
+  labs(x = "Age in years",
+       y = "Effect estimate")
+```
+
+
+```{r}
+ggsave(here::here("figures/misc_blues/fixed_16.ages.transparent_relative.png"), width = 8, height = 5, bg = "transparent")
+```
+
+# Calving season, fescue, and age group BLUEs from environmental models 
+
+## Temperature only (`fixed6`)
+
+```{r, warning=FALSE, message=FALSE}
+c(1:4) %>% 
+  purrr::map_dfr(~ parse_renf90table(here::here("data/derived_data/aireml_varcomp/fixed6/renf90.tables"),
+                                     effect_num = .x,
+                                     effect_key = TRUE)) %>% 
+  left_join(read_table2(here::here("data/derived_data/aireml_varcomp/fixed6/solutions"),
+                        skip = 1,
+                        col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+              mutate(id_renamed = as.character(id_renamed))) %>% 
+  filter(effect %in% c(2, 3, 4))
+```
+
+## Day length only (`fixed5`)
+
+```{r, warning=FALSE, message=FALSE}
+
+c(1:4) %>% 
+  purrr::map_dfr(~ parse_renf90table(here::here("data/derived_data/aireml_varcomp/fixed5/renf90.tables"),
+                                     effect_num = .x,
+                                     effect_key = TRUE)) %>% 
+  left_join(read_table2(here::here("data/derived_data/aireml_varcomp/fixed5/solutions"),
+                        skip = 1,
+                        col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+              mutate(id_renamed = as.character(id_renamed))) %>% 
+  filter(effect %in% c(2, 3, 4))
+
+```
+
+## Temperature + day length (`fixed3`)
+
+```{r, warning=FALSE, message=FALSE}
+c(1:4) %>% 
+  purrr::map_dfr(~ parse_renf90table(here::here("data/derived_data/aireml_varcomp/fixed3/renf90.tables"),
+                                     effect_num = .x,
+                                     effect_key = TRUE)) %>% 
+  left_join(read_table2(here::here("data/derived_data/aireml_varcomp/fixed3/solutions"),
+                        skip = 1,
+                        col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+              mutate(id_renamed = as.character(id_renamed))) %>% 
+  filter(effect %in% c(2, 3, 4))
+```
+
+## Most complicated model: temperature + day length + centered temperature*day length (`fixed13`)
+
+```{r, warning=FALSE, message=FALSE}
+c(1:4) %>% 
+  purrr::map_dfr(~ parse_renf90table(here::here("data/derived_data/aireml_varcomp/fixed13/renf90.tables"),
+                                     effect_num = .x,
+                                     effect_key = TRUE)) %>% 
+  left_join(read_table2(here::here("data/derived_data/aireml_varcomp/fixed13/solutions"),
+                        skip = 1,
+                        col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+              mutate(id_renamed = as.character(id_renamed))) %>% 
+  filter(effect %in% c(2, 3, 4))
+```

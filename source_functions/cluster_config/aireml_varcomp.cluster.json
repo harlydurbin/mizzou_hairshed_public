@@ -1,0 +1,42 @@
+{
+    "__default__":
+    {
+        "p" : "BioCompute,htc4,hpc5",
+        "account" : "animalsci",
+        "mem" : 1G,
+        "c": 1,
+        "t": "01:00:00",
+        "o": "log/slurm_out/aireml_varcomp/{rule}/{wildcards}.%j.out",
+        "mail-user" : "hjdurbin@mail.missouri.edu",
+        "mail-type" : "NONE"
+    },
+    "setup_data":
+    {
+        "t": "01:00:00",
+        "mem" : 6G,
+        "p" : "General,Lewis,BioCompute,htc4,hpc5"
+    },
+    "copy_par":
+    {
+        "t": "01:00:00",
+        "p" : "General,Lewis,BioCompute,htc4,hpc5"
+    },
+    "renumf90":
+    {
+        "t": "01:00:00",
+        "p" : "General,Lewis,BioCompute,htc4,hpc5"
+    },
+    "airemlf90":
+    {
+        "t": "48:00:00",
+        "p" : "BioCompute",
+        "mem" : 100G,
+        "c": 32,
+        "mail-type" : "END"
+    },
+    "cleanup":
+    {
+        "t": "01:00:00",
+        "p" : "General,Lewis,BioCompute,htc4,hpc5"
+    },
+}

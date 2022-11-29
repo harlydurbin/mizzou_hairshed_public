@@ -1,0 +1,486 @@
+---
+title: "Environmental variable summary & BLUES"
+author: "Harly Durbin"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(readr)
+library(tidyr)
+library(stringr)
+library(dplyr)
+library(glue)
+library(readxl)
+library(ggplot2)
+library(magrittr)
+library(purrr)
+#library(tidylog)
+
+source(here::here("source_functions/melt_aireml.R"))
+source(here::here("source_functions/parse_renf90table.R"))
+source(here::here("source_functions/lrt_calc.R"))
+source(here::here("source_functions/parse_loglik.R"))
+```
+
+# Notes & questions
+
+# Setup
+
+```{r, warning=FALSE, message=FALSE}
+cleaned <- read_rds(here::here("data/derived_data/import_join_clean/cleaned.rds"))
+```
+
+```{r, message=FALSE, warning=FALSE}
+weather <- 
+  read_rds(here::here("data/derived_data/environmental_data/weather.rds")) %>%  
+  # Pull daily data from the `data` column and save it to its own column 
+  mutate(daily = purrr::map(data, "daily", .default = NA),
+         # Extract daily high from daily column
+         daily_high = purrr::map_dbl(daily,
+                              ~ .x %>% 
+                                dplyr::pull(temperatureHigh)),
+         daily_high = measurements::conv_unit(daily_high, from = "F", to = "C"),
+         apparent_high = purrr::map_dbl(daily,
+                              ~ .x %>% 
+                                dplyr::pull(apparentTemperatureHigh)),
+         apparent_high = measurements::conv_unit(apparent_high, from = "F", to = "C"),
+         sunrise = purrr::map_chr(daily,
+                                  ~.x %>% 
+                                    dplyr::pull(sunriseTime) %>% 
+                                    as.character(.)),
+         sunset = purrr::map_chr(daily,
+                                  ~.x %>% 
+                                    dplyr::pull(sunsetTime) %>% 
+                                    as.character(.)),
+         sunrise = lubridate::as_datetime(sunrise),
+         sunset = lubridate::as_datetime(sunset),
+         day_length = as.numeric(sunset - sunrise)) %>% 
+  # Remove the data column
+  select(-data) 
+
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+coord_key <- read_csv(here::here("data/derived_data/environmental_data/coord_key.csv"))
+```
+
+# Data summary
+
+```{r, fig.height=5, fig.width=7}
+weather %>% 
+  ggplot(aes(x = day_length,
+             y = apparent_high)) + 
+  geom_hex(aes(fill = stat(count)), bins = 35) +
+  viridis::scale_fill_viridis(option = "inferno",
+                              direction = 1,
+                              begin = .2) +
+  geom_smooth(method = "lm",
+              color = "black",
+              linetype = "dashed",
+              size = 1.5) +
+  theme_classic() +
+  theme(text = element_text(family = "Glacial Indifference"),
+        axis.text = element_text(size = 18),
+        legend.text = element_text(size = 18),
+        legend.title = element_text(size = 20),
+        axis.title.x = element_text(size = 22,
+                                    margin = margin(t = 15)),
+        axis.title.y = element_text(size = 22,
+                                    margin = margin(r = 15,
+                                                    t = 10)),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "transparent",
+                                        colour = NA),
+        plot.background = element_rect(fill = "transparent",
+                                       colour = NA),
+        legend.background = element_rect(fill = "transparent",
+                                       colour = NA)) +
+  labs(x = "Day length (hours)",
+       y = "Apparent high temperature (°C)",
+       fill = "Count")
+
+ggsave(here::here("figures/environmental_data/daylength_vs_temp.hex.png"), height = 6, width = 8, bg = "transparent")
+```
+
+
+## Days from May 1
+
+```{r, message=FALSE, warning=FALSE}
+cleaned %>% 
+  filter(!is.na(date_score_recorded)) %>% 
+  mutate(from_may1 = as.numeric(date_score_recorded - lubridate::ymd(glue("{year}/05/01")))) %>% 
+  summarise(`Mean date deviation` = mean(from_may1),
+            `Median date deviation` = median(from_may1),
+            `SD date deviation` = sd(from_may1))
+```
+
+```{r, message=FALSE, warning=FALSE}
+cleaned %>% 
+  filter(!is.na(date_score_recorded)) %>% 
+  mutate(from_may1 = as.numeric(date_score_recorded - lubridate::ymd(glue("{year}/05/01")))) %>% 
+  ggplot(aes(x = from_may1)) +
+  geom_histogram(bins = 15) +
+  theme_classic() +
+  labs(x = "Days from May 1 when score was recorded",
+       y = "Kernel density")
+```
+
+## Mean apparent high temperature
+
+```{r, message=FALSE, warning=FALSE}
+weather %>% 
+  group_by(date_score_recorded, lat, long) %>% 
+  slice_max(order_by = value, n = 30) %>% 
+  summarise(mean_apparent_high = mean(apparent_high)) %>% 
+  ungroup() %>% 
+  summarise(`Min. mean apparent high` = min(mean_apparent_high),
+            `Max. mean apparent high` = max(mean_apparent_high),
+            `Mean of mean apparent high` = mean(mean_apparent_high),
+            `Median mean apparent high` = median(mean_apparent_high),
+            `SD mean apparent high` = sd(mean_apparent_high))
+```
+
+```{r, message=FALSE, warning=FALSE}
+weather %>% 
+  group_by(date_score_recorded, lat, long) %>% 
+  slice_max(order_by = value, n = 30) %>% 
+  summarise(mean_apparent_high = mean(apparent_high)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = mean_apparent_high)) +
+  geom_density() +
+  theme_classic() +
+  labs(x = "Mean of high apparent temperature in 30 days prior to scoring",
+       y = "Kernel density")
+```
+
+## Day length
+
+```{r}
+weather %>% 
+  group_by(date_score_recorded, lat, long) %>% 
+  slice_max(order_by = value, n = 30) %>% 
+  summarise(mean_day_length = mean(day_length)) %>% 
+  ungroup() %>% 
+  summarise(`Min. mean day length` = min(mean_day_length),
+            `Max. mean day length` = max(mean_day_length),
+            `Mean of mean day length` = mean(mean_day_length),
+            `Median mean day length` = median(mean_day_length),
+            `SD mean day length` = sd(mean_day_length))
+```
+
+```{r, message=FALSE, warning=FALSE}
+weather %>% 
+  group_by(date_score_recorded, lat, long) %>% 
+  slice_max(order_by = value, n = 30) %>% 
+  summarise(mean_day_length = mean(day_length)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = mean_day_length)) +
+  geom_density() +
+  theme_classic() +
+  labs(x = "Mean of day length in 30 days prior to scoring",
+       y = "Kernel density")
+```
+
+## Pearson correlations
+
+```{r}
+weather %>% 
+  group_by(date_score_recorded, lat, long) %>% 
+  # Take rows for max 30 days
+  slice_max(order_by = value, n = 30) %>% 
+  summarise(mean_apparent_high = mean(apparent_high),
+            mean_day_length = mean(day_length)) %>% 
+  ungroup() %>% 
+  right_join(cleaned %>% 
+               filter(!is.na(date_score_recorded)) %>% 
+               left_join(coord_key %>% 
+                           select(farm_id, lat, long))) %>% 
+  mutate(from_may1 = as.numeric(date_score_recorded - lubridate::ymd(glue("{year}/05/01")))) %>% 
+  select(from_may1, lat, mean_apparent_high, mean_day_length) %>% 
+  corrr::correlate()
+
+```
+
+# Temperature vs. latitude BLUEs
+
+## Temperature + latitude (`fixed2`)
+
+```{r, warning=FALSE, message=FALSE}
+read_table2(here::here("data/derived_data/aireml_varcomp/fixed2/solutions"),
+            skip = 1,
+            col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+  filter(effect %in% c(5, 6)) %>% 
+  mutate(effect = case_when(effect == 5 ~ "Mean apparent high temperature",
+                            effect == 6 ~ "Latitude")) %>% 
+  select(Effect = effect, Solution = solution, SE = se)
+```
+
+# Temperature vs. day length BLUEs and LRT comparisons
+
+## Temperature only (`fixed6`)
+
+```{r, warning=FALSE, message=FALSE}
+read_table2(here::here("data/derived_data/aireml_varcomp/fixed6/solutions"),
+            skip = 1,
+            col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+  filter(effect %in% c(5)) %>% 
+  mutate(effect = case_when(effect == 5 ~ "Mean apparent high temperature")) %>% 
+  select(Effect = effect, Solution = solution, SE = se)
+```
+
+## Day length only (`fixed5`)
+
+```{r, warning=FALSE, message=FALSE}
+read_table2(here::here("data/derived_data/aireml_varcomp/fixed5/solutions"),
+            skip = 1,
+            col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+  filter(effect %in% c(5)) %>% 
+  mutate(effect = case_when(effect == 5 ~ "Mean day length")) %>% 
+  select(Effect = effect, Solution = solution, SE = se)
+```
+
+## Temperature + day length (`fixed3`)
+
+When temperature and day length are fit together, their BLUEs are much smaller than when they're fit in their own models independently. The solution for day length is less than half its original estimate Collinearity? 
+
+```{r, warning=FALSE, message=FALSE}
+read_table2(here::here("data/derived_data/aireml_varcomp/fixed3/solutions"),
+            skip = 1,
+            col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+  filter(effect %in% c(5, 6)) %>% 
+  mutate(effect = case_when(effect == 5 ~ "Mean apparent high temperature",
+                            effect == 6 ~ "Mean day length")) %>% 
+  select(Effect = effect, Solution = solution, SE = se)
+```
+
+> Does this model provide a better fit than either of the more simple independent models? First, compared against `fixed6` temperature only model. $-log_{10}(p-value)$ from the a likelihood ratio test comparing the two models:
+
+```{r}
+
+lrt_calc(ll_null = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed6/airemlf90.fixed6.log"),
+                                option = "logL"),
+         ll_test = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed3/airemlf90.fixed3.log"),
+                                option = "logL"))
+
+```
+
+> Next, compared against `fixed5` day length only model. $-log_{10}(p-value)$ from the a likelihood ratio test comparing the two models:
+
+```{r}
+
+lrt_calc(ll_null = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed5/airemlf90.fixed5.log"),
+                                option = "logL"),
+         ll_test = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed3/airemlf90.fixed3.log"),
+                                option = "logL"))
+
+```
+
+> The model with both variables also has a lower AIC value than either of the models with a single environmental variable:
+
+```{r}
+tibble(Model = c("fixed3", "fixed6", "fixed5")) %>%
+  mutate(AIC = purrr::map_dbl(.x = Model,
+                              ~ parse_loglik(path = here::here(glue("data/derived_data/aireml_varcomp/{.x}/airemlf90.{.x}.log")),
+                                             option = "AIC")),
+         Model = case_when(Model == "fixed3" ~ "Temperature + day length",
+                           Model == "fixed6" ~ "Temperature only",
+                           Model == "fixed5" ~ "Day length only")) 
+```
+
+## Most complicated model: temperature + day length + centered temperature*day length (`fixed13`)
+
+```{r, warning=FALSE, message=FALSE}
+read_table2(here::here("data/derived_data/aireml_varcomp/fixed13/solutions"),
+            skip = 1,
+            col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+  filter(effect %in% c(5, 6, 7)) %>% 
+  mutate(effect = case_when(effect == 5 ~ "Mean apparent high temperature",
+                            effect == 6 ~ "Mean day length",
+                            effect == 7 ~ "Interaction effect")) %>% 
+  select(Effect = effect, Solution = solution, SE = se)
+```
+
+> Does including an interaction effect provide a better fit than the `fixed3` model with both temperature and day length? $-log_{10}(p-value)$ from the a likelihood ratio test comparing the two models:
+
+```{r}
+
+lrt_calc(ll_null = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed3/airemlf90.fixed3.log"),
+                                option = "logL"),
+         ll_test = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed13/airemlf90.fixed13.log"),
+                                option = "logL"))
+
+```
+
+> AIC values from both models:
+
+```{r}
+tibble(Model = c("fixed13", "fixed3")) %>%
+  mutate(AIC = purrr::map_dbl(.x = Model,
+                              ~ parse_loglik(path = here::here(glue("data/derived_data/aireml_varcomp/{.x}/airemlf90.{.x}.log")),
+                                             option = "AIC")),
+         Model = case_when(Model == "fixed3" ~ "Temperature + day length",
+                           Model == "fixed13" ~ "Temperature + day length + temperature*day length")) 
+```
+
+# Is farm/herd ID an appropriate proxy for environmental measurements?
+
+## Temperature + day length + farm ID (`fixed8`)
+
+> Does fitting temperature, day length, and farm ID provide a better fit over fitting farm ID alone (`fixed7`)? $-log_{10}(p-value)$ from the a likelihood ratio test comparing the two models:
+
+```{r}
+
+lrt_calc(ll_null = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed7/airemlf90.fixed7.log"),
+                                option = "logL"),
+         ll_test = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed8/airemlf90.fixed8.log"),
+                                option = "logL"))
+
+```
+
+> Does fitting farm ID in addition to temperature and day length provide a better fit over fitting temperature and day length alone (`fixed3`)? $-log_{10}(p-value)$ from the a likelihood ratio test comparing the two models:
+
+```{r}
+
+lrt_calc(ll_null = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed3/airemlf90.fixed3.log"),
+                                option = "logL"),
+         ll_test = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed8/airemlf90.fixed8.log"),
+                                option = "logL"))
+
+```
+
+> AIC values for all 3 models compared: 
+
+```{r}
+tibble(Model = c("fixed7", "fixed3", "fixed8")) %>%
+  mutate(AIC = purrr::map_dbl(.x = Model,
+                              ~ parse_loglik(path = here::here(glue("data/derived_data/aireml_varcomp/{.x}/airemlf90.{.x}.log")),
+                                             option = "AIC")),
+         Model = case_when(Model == "fixed3" ~ "Temperature + day length",
+                           Model == "fixed7" ~ "Farm ID only",
+                           Model == "fixed8" ~ "Temperature + day length + farm ID")) 
+```
+
+I think one issue with this comparison is the lack of a `score_group` effect, which accounts for both day length and temperature by grouping animals on the same farm based on when they were scored. I think it also isn't an appropriate comparison to how this model would be fit in a genetic evaluation, since the number of parameters estimated affects the AIC and in a genetic evaluation everything tested here would essentially be combined into one fixed contemporary group effect. 
+
+# Do additional environmental variables need to be fit outside of contemporary group (`{farm_id + year + calving_season + age_group + score_group + toxic_fescue}`)?
+
+## Contemporary group + temperature (`fixed10`)
+
+```{r, warning=FALSE, message=FALSE}
+read_table2(here::here("data/derived_data/aireml_varcomp/fixed10/solutions"),
+            skip = 1,
+            col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+  filter(effect %in% c(2)) %>% 
+  mutate(effect = case_when(effect == 2 ~ "Mean apparent high temperature")) %>% 
+  select(Effect = effect, Solution = solution, SE = se)
+```
+
+> Does including temperature provide a better fit over contemporary group alone (`fixed9`)? $-log_{10}(p-value)$ from the a likelihood ratio test comparing the two models:
+
+```{r}
+
+lrt_calc(ll_null = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed9/airemlf90.fixed9.log"),
+                                option = "logL"),
+         ll_test = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed10/airemlf90.fixed10.log"),
+                                option = "logL"))
+
+```
+
+## Contemporary group + day length (`fixed11`)
+
+```{r, warning=FALSE, message=FALSE}
+read_table2(here::here("data/derived_data/aireml_varcomp/fixed11/solutions"),
+            skip = 1,
+            col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+  filter(effect %in% c(2)) %>% 
+  mutate(effect = case_when(effect == 2 ~ "Mean day length")) %>% 
+  select(Effect = effect, Solution = solution, SE = se)
+```
+
+> Does including day length provide a better fit over contemporary group alone (`fixed9`)? $-log_{10}(p-value)$ from the a likelihood ratio test comparing the two models:
+
+```{r}
+
+lrt_calc(ll_null = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed9/airemlf90.fixed9.log"),
+                                option = "logL"),
+         ll_test = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed11/airemlf90.fixed11.log"),
+                                option = "logL"))
+
+```
+
+## Contemporary group + temperature + day length (`fixed12`)
+
+Temperature sign change
+
+```{r, warning=FALSE, message=FALSE}
+read_table2(here::here("data/derived_data/aireml_varcomp/fixed12/solutions"),
+            skip = 1,
+            col_names = c("trait", "effect", "id_renamed", "solution", "se")) %>%
+  filter(effect %in% c(2, 3)) %>% 
+  mutate(effect = case_when(effect == 3 ~ "Mean day length",
+                            effect == 2 ~ "Mean apparent high temperature")) %>% 
+  select(Effect = effect, Solution = solution, SE = se)
+```
+
+> Is the model with contemporary gproup, temperature, and day length a better fit than the model with just contemporary group and temperature (`fixed10`)? $-log_{10}(p-value)$ from the a likelihood ratio test comparing the two models:
+
+```{r}
+
+lrt_calc(ll_null = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed10/airemlf90.fixed10.log"),
+                                option = "logL"),
+         ll_test = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed12/airemlf90.fixed12.log"),
+                                option = "logL"))
+
+```
+
+> ...over the model with just contemporary group and day length (`fixed11`)? 
+
+```{r}
+
+lrt_calc(ll_null = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed11/airemlf90.fixed11.log"),
+                                option = "logL"),
+         ll_test = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed12/airemlf90.fixed12.log"),
+                                option = "logL"))
+
+```
+
+## AIC values for all contemporary group vs. temperature vs. day length models
+
+```{r}
+tibble(Model = c("fixed9", "fixed10", "fixed11", "fixed12")) %>%
+  mutate(AIC = purrr::map_dbl(.x = Model,
+                              ~ parse_loglik(path = here::here(glue("data/derived_data/aireml_varcomp/{.x}/airemlf90.{.x}.log")),
+                                             option = "AIC")),
+         Model = case_when(Model == "fixed10" ~ "Contemporary group + temperature",
+                           Model == "fixed9" ~ "Contemporary group only",
+                           Model == "fixed11" ~ "Contemporary group + day length",
+                           Model == "fixed12" ~ "Contemporary group + temperature + day length")) 
+```
+
+# Commentary
+
+## Manuscript graveyard
+
+The mean apparent high temperature was found to be highly correlated with the date a score was recorded (Pearson r = 0.82) but only moderately correlated with latitude (Pearson r = -0.21). For this reason, we chose to use latitude as the only proxy for day length and exclude score date from analyses dissecting the effects of temperature vs. photoperiod.
+
+```{r}
+read_table2(here::here("data/derived_data/aireml_varcomp/fixed13/renf90.dat"),
+            col_names = FALSE) %>% 
+  select(dl = X7, temp = X6, centered_interact = X8) %>% 
+  summarise_if(is.numeric, mean)
+```
+
+```{r}
+read_table2(here::here("data/derived_data/aireml_varcomp/fixed13/renf90.dat"),
+            col_names = FALSE) %>% 
+  select(dl = X7, temp = X6, centered_interact = X8) %>% 
+  summarise_if(is.numeric, sd)
+```

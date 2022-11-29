@@ -1,0 +1,55 @@
+# Paths relative to the current working directory
+DATAFILE
+data.txt
+TRAITS
+5
+# Pass my first column (registration number/ID) to output
+FIELDS_PASSED TO OUTPUT
+1
+WEIGHT(S)
+
+RESIDUAL_VARIANCE
+0.5
+# Contemporary group effect
+EFFECT
+2 cross alpha
+# mean_apparent_high effect
+EFFECT
+3 cov
+# mean_day_length effect
+EFFECT
+4 cov
+EFFECT
+1 cross alpha
+RANDOM
+animal
+OPTIONAL
+pe
+FILE
+ped.txt
+FILE_POS
+1 2 3 0 0
+SNP_FILE
+genotypes.txt
+PED_DEPTH
+3
+INBREEDING
+pedigree
+(CO)VARIANCES
+0.3
+(CO)VARIANCES_PE
+0.07
+# Not filtering on allele frequency
+OPTION minfreq 0.0001
+# Turn off filtering on call rate in order to use same SNPs across all analyses
+OPTION callrate 0
+OPTION chrinfo ../../../raw_data/geno_dump/200924_HairShed.850K.chrinfo.txt
+OPTION residual
+OPTION sol se
+OPTION conv_crit 1e-12
+OPTION use_yams
+OPTION sex_chr 30
+OPTION excludeCHR
+OPTION maxsnp 1000000
+OPTION missing -999
+OPTION solv_method FSPAK

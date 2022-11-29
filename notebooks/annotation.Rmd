@@ -1,0 +1,864 @@
+---
+title: "GWAS results annotation & enrichment"
+author: "Harly Durbin"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: TRUE
+    df_print: paged
+    code_folding: hide
+params:
+  search_space: 50000
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(purrr)
+library(glue)
+library(magrittr)
+library(stringr)
+library(GALLO)
+library(gprofiler2)
+
+source(here::here("source_functions/gcif.R"))
+
+options(scipen = 0)
+
+q_fdr5 <- -log10(.05)
+q_fdr1 <- -log10(.01)
+
+search_space <- params$search_space
+```
+
+# Notes & questions
+
+* SNP1101 `freq` column is allele frequency not genotype frequency: $\frac{g_2+\frac{1}{2}g_1}{g_0+g_1+g_2}$ or $\frac{2g_{2}+g_{1}}{2(g_0+g_1+g_2)}$
+
+---
+
+# Setup
+
+
+## Upstream results
+
+### SNP1101
+
+```{r}
+fixed9_snp1101 <-
+  read_table2(here::here("data/derived_data/snp1101/fixed9/out/gwas_ssr_fixed9_bvs_p.txt"))  %>%
+  janitor::clean_names() %>%
+  mutate(adj_p = gcif(df = .,
+                      adjust_p = TRUE,
+                      p_col = p_value),
+         q = qvalue::qvalue(adj_p)$qvalues,
+         neglog10q = -log10(q))
+  
+```
+
+### Metasoft main effects 
+
+```{r}
+years_metasoft <- 
+  # Use lambda adjusted RE2 p-values 
+  read_table2(here::here("data/derived_data/metasoft/years/metasoft_out.years_adj.txt"),
+              col_types = cols(.default = "d", RSID = "c")) %>% 
+  janitor::clean_names() %>% 
+  select(-pvalue_be, -contains("fe")) %>% 
+  left_join(read_table2(here::here("data/derived_data/metasoft/years/metasoft_out.years_adj.txt"),
+                        skip = 1,
+                        col_types = "c---------------dddddddd", 
+                        col_names = c("rsid", "p16", "p17", "p18", "p19", "m16", "m17", "m18", "m19"))) %>% 
+  # Metasoft won't adjust RE1 p-values, do it manually
+  mutate(adj_p_re = gcif(., p_col = pvalue_re, adjust_p = TRUE),
+         neglog10q = -log10(qvalue::qvalue(adj_p_re)$qvalues),
+         chr = as.numeric(str_extract(rsid, "[[:digit:]]{1,2}(?=:)")),
+         pos = as.numeric(str_extract(rsid, "(?<=[[:digit:]]{1,2}:)[[:digit:]]+")))
+```
+
+### COJO
+
+```{r}
+years_jma <- 
+  read_table2(here::here("data/derived_data/cojo/years/years_subset_adj.jma.cojo")) %>% 
+  janitor::clean_names() %>% 
+  rename(pos = bp)
+```
+
+### Metasoft GxE
+
+```{r, warning=FALSE, message=FALSE}
+gxe_metasoft_dl <- 
+  read_table2(here::here("data/derived_data/metasoft/day_length/metasoft_out.day_length_adj.txt"),
+              col_types = cols(.default = "d", RSID = "c")) %>% 
+  janitor::clean_names() %>% 
+  select(-pvalue_be, -contains("fe")) %>%
+  left_join(read_table2(here::here("data/derived_data/metasoft/day_length/metasoft_out.day_length_adj.txt"),
+                        skip = 1,
+                        col_types = "c---------------dddddddd", 
+                        col_names = c("rsid", "p16", "p17", "p18", "p19", "m16", "m17", "m18", "m19"))) %>% 
+  mutate(chr = as.numeric(str_extract(rsid, "[[:digit:]]{1,2}(?=:)")),
+         pos = as.numeric(str_extract(rsid, "(?<=[[:digit:]]{1,2}:)[[:digit:]]+")),
+         neglog10q_re2 = -log10(qvalue::qvalue(pvalue_re2)$qvalues))
+```
+
+```{r, warning=FALSE, message=FALSE}
+gxe_metasoft_temp <- 
+  read_table2(here::here("data/derived_data/metasoft/temp/metasoft_out.temp_adj.txt"),
+              col_types = cols(.default = "d", RSID = "c")) %>% 
+  janitor::clean_names() %>% 
+  select(-pvalue_be, -contains("fe")) %>%
+  left_join(read_table2(here::here("data/derived_data/metasoft/temp/metasoft_out.temp_adj.txt"),
+                        skip = 1,
+                        col_types = "c---------------dddddddd", 
+                        col_names = c("rsid", "p16", "p17", "p18", "p19", "m16", "m17", "m18", "m19"))) %>% 
+  mutate(chr = as.numeric(str_extract(rsid, "[[:digit:]]{1,2}(?=:)")),
+         pos = as.numeric(str_extract(rsid, "(?<=[[:digit:]]{1,2}:)[[:digit:]]+")),
+         neglog10q_re2 = -log10(qvalue::qvalue(pvalue_re2)$qvalues))
+```
+
+## Import GFF and GTF files for GALLO
+
+```{r}
+# Note: had to manually install rtracklayer dependency for GALLO
+# https://bioconductor.org/packages/release/bioc/html/rtracklayer.html
+gtf <-
+  import_gff_gtf(db_file = here::here("data/raw_data/annotation/Bos_taurus.ARS-UCD1.2.101.gtf"),
+                 file_type = "gtf")
+```
+
+```{r}
+gff <-
+  import_gff_gtf(db_file = here::here("data/raw_data/annotation/Bos_taurus.ARS-UCD1.2.QTL.gff"),
+                 file_type = "gff")
+```
+
+## CNVs reported by Keel et al. (2017)
+
+```{r}
+keel_cnv <-
+  readxl::read_excel(here::here("data/raw_data/annotation/age12519-sup-0006-tables3.xlsx"),
+                     sheet = "A",
+                     skip = 2) %>% 
+  janitor::clean_names() %>% 
+  select(cnvr, chr = chromosome, start_pos = start, end_pos = end, type, number_samples) %>% 
+  mutate_at(vars(contains("pos")), ~ as.integer(.))
+  
+  
+```
+
+# Annotation
+
+## Genes
+
+### Variants within genes
+
+```{r, eval = FALSE}
+gene0 <-
+  find_genes_qtls_around_markers(db_file = gtf,
+                                 marker_file = fixed9_snp1101 %>% 
+                                   filter(neglog10q >= q_fdr5) %>% 
+                                   select(CHR = chr, BP = pos),
+                                 method = c("gene"),
+                                 marker = c("snp"),
+                                 interval = 0) %>% 
+  mutate(which = "fixed9") %>% 
+  bind_rows(find_genes_qtls_around_markers(db_file = gtf,
+                                           marker_file = years_metasoft %>% 
+                                             filter(neglog10q >= q_fdr5) %>% 
+                                             select(CHR = chr, BP = pos),
+                                           method = c("gene"),
+                                           marker = c("snp"),
+                                           interval = 0) %>% 
+              mutate(which = "metasoft")) %>% 
+  bind_rows(find_genes_qtls_around_markers(db_file = gtf,
+                                           marker_file = years_jma %>% 
+                                             select(CHR = chr, BP = pos),
+                                           method = c("gene"),
+                                           marker = c("snp"),
+                                           interval = 0) %>% 
+              mutate(which = "cojo")) %>%
+  bind_rows(find_genes_qtls_around_markers(db_file = gtf,
+                                           marker_file = gxe_metasoft_dl %>% 
+                                             filter(neglog10q_re2 >= q_fdr5) %>% 
+                                             select(CHR = chr, BP = pos),
+                                           method = c("gene"),
+                                           marker = c("snp"),
+                                           interval = 0) %>% 
+              mutate(which = "gxe_day_length")) %>% 
+  bind_rows(find_genes_qtls_around_markers(db_file = gtf,
+                                           marker_file = gxe_metasoft_temp %>% 
+                                             filter(neglog10q_re2 >= q_fdr5) %>% 
+                                             select(CHR = chr, BP = pos),
+                                           method = c("gene"),
+                                           marker = c("snp"),
+                                           interval = 0) %>% 
+              mutate(which = "gxe_temp"))
+```
+
+### Genes within designated search space
+
+```{r}
+cojo_nearest_gene <-
+  function(search_space) {
+    
+    within_space <-
+      find_genes_qtls_around_markers(db_file = gtf,
+                                     marker_file = years_jma %>% 
+                                       select(CHR = chr, BP = pos),
+                                     method = c("gene"),
+                                     marker = c("snp"),
+                                     interval = search_space)
+    
+    nearest_gene <-
+      years_jma %>% 
+      select(CHR = chr, BP = pos) %>% 
+      left_join(within_space) %>% 
+      filter(is.na(start_pos)) %>% 
+      select(CHR, BP) %>% 
+      find_genes_qtls_around_markers(db_file = gtf,
+                                     method = c("gene"),
+                                     marker = c("snp"),
+                                     interval = 1000000)
+    
+    nearest_gene %<>%
+      mutate(start_dist = abs(BP-start_pos),
+             end_dist = abs(BP-end_pos),
+             abs_dist = if_else(start_dist > end_dist, end_dist, start_dist)) %>%
+      arrange(CHR, BP, abs_dist) %>%
+      group_by(CHR, BP) %>% 
+      slice(1) %>% 
+      ungroup() %>% 
+      select(-start_dist, -end_dist, -abs_dist)
+    
+    bind_rows(within_space, nearest_gene) %>% 
+      mutate(which = "cojo")
+    
+  }
+```
+
+```{r}
+gene <-
+  cojo_nearest_gene(search_space = search_space) %>% 
+  bind_rows(find_genes_qtls_around_markers(db_file = gtf,
+                                           marker_file = fixed9_snp1101 %>% 
+                                             filter(neglog10q >= q_fdr5) %>% 
+                                             select(CHR = chr, BP = pos),
+                                           method = c("gene"),
+                                           marker = c("snp"),
+                                           interval = search_space) %>% 
+              mutate(which = "fixed9")) %>% 
+  bind_rows(find_genes_qtls_around_markers(db_file = gtf,
+                                           marker_file = years_metasoft %>% 
+                                             filter(neglog10q >= q_fdr5) %>% 
+                                             select(CHR = chr, BP = pos),
+                                           method = c("gene"),
+                                           marker = c("snp"),
+                                           interval = search_space) %>% 
+              mutate(which = "metasoft")) %>%
+  bind_rows(find_genes_qtls_around_markers(db_file = gtf,
+                                           marker_file = gxe_metasoft_dl %>% 
+                                             filter(neglog10q_re2 >= q_fdr5) %>% 
+                                             select(CHR = chr, BP = pos),
+                                           method = c("gene"),
+                                           marker = c("snp"),
+                                           interval = search_space) %>% 
+              mutate(which = "gxe_day_length")) %>% 
+  bind_rows(find_genes_qtls_around_markers(db_file = gtf,
+                                           marker_file = gxe_metasoft_temp %>% 
+                                             filter(neglog10q_re2 >= q_fdr5) %>% 
+                                             select(CHR = chr, BP = pos),
+                                           method = c("gene"),
+                                           marker = c("snp"),
+                                           interval = search_space) %>% 
+              mutate(which = "gxe_temp"))
+  
+```
+
+## QTLs
+
+```{r}
+qtl <-
+  find_genes_qtls_around_markers(db_file = gff,
+                                 marker_file = fixed9_snp1101 %>% 
+                                   filter(neglog10q >= q_fdr5) %>% 
+                                   select(CHR = chr, BP = pos),
+                                 method = c("qtl"),
+                                 marker = c("snp"),
+                                 interval = search_space) %>% 
+  mutate(which = "fixed9") %>%
+  bind_rows(find_genes_qtls_around_markers(db_file = gff,
+                                           marker_file = years_metasoft %>% 
+                                             filter(neglog10q >= q_fdr5) %>%
+                                             select(CHR = chr, BP = pos),
+                                           method = c("qtl"),
+                                           marker = c("snp"),
+                                           interval = search_space) %>% 
+              mutate(which = "metasoft")) %>%
+  bind_rows(find_genes_qtls_around_markers(db_file = gff,
+                                           marker_file = years_jma %>% 
+                                             select(CHR = chr, BP = pos),
+                                           method = c("qtl"),
+                                           marker = c("snp"),
+                                           interval = search_space) %>% 
+              mutate(which = "cojo")) %>% 
+  bind_rows(find_genes_qtls_around_markers(db_file = gff,
+                                           marker_file = gxe_metasoft_dl %>% 
+                                             filter(neglog10q_re2 >= q_fdr5) %>% 
+                                             select(CHR = chr, BP = pos),
+                                           method = c("qtl"),
+                                           marker = c("snp"),
+                                           interval = search_space) %>% 
+              mutate(which = "gxe_day_length")) %>% 
+  bind_rows(find_genes_qtls_around_markers(db_file = gff,
+                                           marker_file = gxe_metasoft_temp %>% 
+                                             filter(neglog10q_re2 >= q_fdr5) %>% 
+                                             select(CHR = chr, BP = pos),
+                                           method = c("qtl"),
+                                           marker = c("snp"),
+                                           interval = search_space) %>% 
+              mutate(which = "gxe_temp"))
+```
+
+# Calculate enrichments
+
+## Genes
+
+```{r}
+gene_enrich <-
+  c("fixed9", "metasoft", "cojo", "gxe_day_length") %>% 
+  purrr::set_names() %>% 
+  purrr::map(~ gene %>%
+               filter(which == .x) %>% 
+               distinct(gene_id) %>% 
+               pull(gene_id) %>% 
+               gost(organism = "btaurus",
+                    significant = TRUE,
+                    ordered = FALSE,
+                    evcodes = TRUE))
+```
+
+```{r}
+gene_result <-
+  c("fixed9", "metasoft", "cojo", "gxe_day_length") %>% 
+  map_dfr(~ gene_enrich[[.x]]$result %>% 
+            mutate(which = .x))
+```
+
+## QTL
+
+```{r}
+qtl_enrich <-
+  c("fixed9", "metasoft", "cojo", "gxe_day_length") %>%  
+  purrr::map_dfr(~ qtl_enrich(qtl_db = gff,
+                              qtl_file = qtl %>% 
+                                filter(which == .x),
+                              qtl_type = "Name",
+                              enrich_type = "genome",
+                              padj = "BH") %>% 
+                   mutate(which = .x))
+```
+
+# Gene ontology enrichment results
+
+* `term_size` - number of genes that are annotated to the term
+* `query_size` - number of genes that were included in the query. This might be different from the size of the original list if:
+    + any genes were mapped to multiple Ensembl gene IDs
+    + any genes failed to be mapped to Ensembl gene IDs
+    + the parameter ordered_query = TRUE and the optimal cutoff for the term was found before the end of the query
+    + the domain_scope was set to “annotated” or “custom”
+* `intersection_size` - the number of genes in the input query that are annotated to the corresponding term
+* `precision` - the proportion of genes in the input list that are annotated to the function (defined as intersection_size/query_size)
+* Sources: "GO:MF" "GO:CC" "GO:BP" "KEGG"  "REAC"  "MIRNA" "CORUM" "HP" "WP"
+
+```{r, eval=FALSE}
+listviewer::jsonedit(gene_enrich)
+```
+
+```{r, eval=FALSE}
+gene_result %>% 
+  select(which, term_name, p_value, everything(), -query, -significant) %>% 
+  arrange(which, p_value) 
+```
+
+## Apoptosis results
+
+```{r, eval=FALSE}
+gene_result %>% 
+  filter(which %in% c("fixed9", "metasoft")) %>% 
+  filter(source == "GO:BP") %>% 
+  mutate(list = str_split(intersection, ",")) %>% 
+  pull(list) %>% 
+  flatten_chr() %>% 
+  unique() %>% 
+  gconvert(organism = "btaurus") %>% 
+  select(gene_name = name, description) %>% 
+  left_join(gene %>% 
+              mutate(gene_name = if_else(!is.na(gene_name), gene_name, gene_id),
+                     chr = as.integer(chr)) %>% 
+              select(chr, start_pos, end_pos, gene_name, gene_biotype) %>% 
+              distinct()) %>% 
+  arrange(chr)
+```
+
+## GxE
+
+### Keratinization
+
+```{r, eval=FALSE}
+gene_result %>% 
+  filter(which == "gxe") %>% 
+  filter(str_detect(source, "GO")) %>% 
+  mutate(list = str_split(intersection, ",")) %>% 
+  pull(list) %>% 
+  flatten_chr() %>% 
+  unique() %>% 
+  gconvert(organism = "btaurus") %>% 
+  select(gene_name = name, description) %>% 
+  left_join(gene %>% 
+              mutate(gene_name = if_else(!is.na(gene_name), gene_name, gene_id),
+                     chr = as.integer(chr)) %>% 
+              select(chr, start_pos, end_pos, gene_name, gene_biotype) %>% 
+              distinct()) %>% 
+  arrange(chr)
+```
+
+```{r}
+gene %>% 
+  filter(which == "gxe") %>% 
+  filter(str_detect(gene_name, "KRT")) %>% 
+  distinct(CHR, start_pos, end_pos, gene_name)
+```
+
+### Metabolism
+
+```{r}
+
+```
+
+# QTL enrichment results
+
+```{r, eval=FALSE}
+qtl_enrich %>%
+  filter(0.05 > adj.pval) %>% 
+  arrange(which, adj.pval) %>% 
+  filter(N_QTLs > 1) %>%
+  filter(QTL_type != "Milk") %>% 
+  select(which, adj.pval, QTL, QTL_type, everything()) 
+```
+
+## How many SNPs within each QTL?
+
+```{r, eval=FALSE}
+qtl_enrich %>% 
+  filter(0.05 > adj.pval) %>%
+  filter(QTL_type != "Milk") %>% 
+  filter(N_QTLs > 1) %>% 
+  arrange(adj.pval) %>% 
+  left_join(qtl %>% 
+              select(CHR, BP, QTL = trait_ID, QTL_ID, which)) %>% 
+  group_by(QTL, N_QTLs, adj.pval, which) %>%
+  mutate(n_snp = n_distinct(CHR, BP)) %>% 
+  ungroup() %>% 
+  group_by(QTL, N_QTLs, adj.pval, which, n_snp) %>%
+  tidyr::nest() %>% 
+  ungroup() %>% 
+  mutate(unique_chr = purrr::map_chr(.x = data, 
+                                 ~ .x %>% 
+                                   arrange(CHR, BP) %>% 
+                                   mutate(chr_bp = glue("{CHR}:{scales::comma(BP)}")) %>% 
+                                   distinct(chr_bp) %>% 
+                                   pull(chr_bp) %>% 
+                                   glue_collapse(sep = "; "))) %>% 
+  arrange(which, adj.pval) %>% 
+  filter(n_snp > 1) %>% 
+  select(Dataset = which, `QTL name` = QTL, `Adj. P-value` = adj.pval, `N annotations` = N_QTLs, `N SNPs` = n_snp, SNPs = unique_chr) %>% 
+  write_csv(here::here("data/derived_data/annotation/qtl_enrich.csv"))
+```
+
+```{r}
+qtl_enrich %>% 
+  filter(0.05 > adj.pval) %>%
+  filter(QTL_type != "Milk") %>% 
+  filter(N_QTLs > 1) %>% 
+  arrange(adj.pval) %>% 
+  left_join(qtl %>% 
+              select(CHR, BP, QTL = trait_ID, QTL_ID, which)) %>% 
+  group_by(QTL, N_QTLs, adj.pval, which) %>%
+  mutate(n_snp = n_distinct(CHR, BP)) %>% 
+  ungroup() %>% 
+  filter(n_snp > 1) %>% 
+  group_by(QTL, N_QTLs, adj.pval, which, n_snp, CHR) %>% 
+  arrange(QTL, N_QTLs, adj.pval, which, CHR, BP) %>% 
+  mutate(lag = lag(BP),
+         dist = BP - lag,
+         dist = tidyr::replace_na(dist, 0),
+         far = case_when(dist > 10000  ~ TRUE,
+                         TRUE ~ FALSE),
+         far2 = case_when(lag(far) == TRUE & far == TRUE ~ FALSE,
+                         TRUE ~ far),
+         test = data.table::rleid(far2)) %>% 
+  select(dist, far, far2, test, CHR, BP, everything()) %>% 
+  ungroup() %>% 
+  group_by(QTL, N_QTLs, adj.pval, which, n_snp, CHR, test) %>% 
+  summarise(min = min(BP),
+            max = max(BP)) %>% 
+  ungroup() %>% 
+  group_by(QTL, N_QTLs, adj.pval, which, CHR, n_snp) %>% 
+  arrange(QTL, which, CHR, min, max) %>% 
+  filter(min != lead(min)) %>% 
+  ungroup() %>% 
+  group_by(QTL, N_QTLs, adj.pval, which, n_snp) %>% 
+  tidyr::nest() %>% 
+  ungroup() %>% 
+  mutate(intervals = purrr::map_chr(.x = data,
+                                    ~ .x %>% 
+                                      distinct(CHR, min, max) %>% 
+                                      arrange(CHR, min, max) %>% 
+                                      mutate(interval = case_when(min == max ~ glue("{CHR}:{scales::comma(min)}"),
+                                                                 TRUE ~ glue("{CHR}:{scales::comma(min)}-{scales::comma(max)}"))) %>% 
+                                      pull(interval) %>% 
+                                      glue_collapse(sep = "; ")))
+  
+```
+
+
+## White spotting
+
+```{r, eval=FALSE}
+qtl_enrich %>% 
+  filter(QTL == "White spotting" & which %in% c("fixed9", "metasoft")) %>% 
+  left_join(qtl %>% 
+              select(CHR, BP, QTL = trait_ID, QTL_ID, which)) %>% 
+  left_join(gene %>% 
+              select(CHR, BP, gene_id, gene_name, which)) %>% 
+  mutate(SNP = glue("{CHR}:{scales::comma(BP)}"),
+         Gene = if_else(!is.na(gene_name), gene_name, gene_id)) %>%
+  select(Dataset = which, `QTL name` = QTL, `Adj. P-value` = adj.pval, `N annotations` = N_QTLs, SNP, Gene) %>% 
+  distinct() %>% 
+  filter(!is.na(Gene)) %>% 
+  arrange(Dataset, SNP)
+```
+
+## Growth QTL
+
+```{r, eval=FALSE}
+qtl_enrich %>% 
+  filter(0.05 >= adj.pval) %>% 
+  filter(N_QTLs > 1) %>% 
+  filter(str_detect(QTL, "Body weight|body weight")) %>% 
+  left_join(qtl %>% 
+              select(CHR, BP, QTL = trait_ID, QTL_ID, which)) %>% 
+  left_join(gene %>% 
+              select(CHR, BP, gene_id, gene_name, which)) %>% 
+  mutate(SNP = glue("{CHR}:{scales::comma(BP)}"),
+         Gene = if_else(!is.na(gene_name), gene_name, gene_id)) %>%
+  select(Dataset = which, `QTL name` = QTL, `Adj. P-value` = adj.pval, `N annotations` = N_QTLs, SNP, Gene) %>% 
+  distinct() %>% 
+  filter(!is.na(Gene)) %>% 
+  arrange(Dataset, SNP)
+```
+
+```{r, eval=FALSE}
+gene %>% 
+  filter(str_detect(gene_name, "GH"))
+```
+
+# Positional candidates
+
+```{r, eval = FALSE}
+gene %>% 
+  filter(which == "cojo")
+```
+
+## Chromosome 5
+
+```{r, eval=FALSE}
+gene %>% 
+  filter(which != "gxe") %>% 
+  filter(CHR == 5) %>% 
+  mutate(start_dist = abs(BP-start_pos),
+         end_dist = abs(BP-end_pos),
+         Distance = if_else(start_dist > end_dist, as.integer(end_dist), as.integer(start_dist)),
+         Gene = if_else(!is.na(gene_name), gene_name, gene_id),
+         SNP = glue("{CHR}:{scales::comma(BP)}"),
+         Start = scales::comma(start_pos),
+         End = scales::comma(end_pos),
+         Distance = scales::comma(Distance, digits = 0),
+         Distance = str_remove(Distance, "\\.0")) %>% 
+  select(which, SNP, Gene, Start, End, Distance) %>% 
+  add_count(Gene)
+```
+
+```{r, eval=FALSE}
+keel_cnv %>% 
+  filter(chr == 5) %>% 
+  arrange(start_pos) %>% 
+  mutate(query = glue("chr5:{start_pos}-{end_pos}"),
+         freq = number_samples/154) %>% 
+  left_join(read_tsv(here::here("data/raw_data/annotation/report_remap_textarea.xls")) %>% 
+              janitor::remove_empty(which = c("rows", "cols")) %>% 
+              filter(!is.na(coverage)) %>% 
+              filter(mapped_id == "chr5") %>% 
+              mutate(query = glue("{source_id}:{source_start}-{source_stop}")) %>% 
+              select(query, mapped_start, mapped_end = mapped_stop, mapped_cov = coverage)) %>% 
+  filter(!is.na(mapped_start)) %>% 
+  filter(34000000	> mapped_start) %>% 
+  filter(mapped_start > 17000000) %>% 
+  left_join(readxl::read_excel(here::here("data/raw_data/annotation/age12519-sup-0006-tables3.xlsx"),
+                               sheet = "B",
+                               skip = 2) %>% 
+              janitor::clean_names() %>% 
+              rename(chr = chromosome, start_pos = start, end_pos = end) %>% 
+              mutate_at(vars(contains("pos")), ~ as.integer(.)))
+```
+
+```{r, eval = FALSE}
+readxl::read_excel(here::here("data/raw_data/annotation/age12519-sup-0006-tables3.xlsx"),
+                     sheet = "B",
+                     skip = 2) %>% 
+  janitor::clean_names() %>% 
+  rename(chr = chromosome, start_pos = start, end_pos = end) %>% 
+  filter(chr == 5) %>% 
+  tidyr::pivot_longer(cols = c("hereford", "angus", "simmental", "limousin", "charolais", "gelbvieh", "red_angus"),
+                      names_to = "breed",
+                      values_to = "n_breed")
+```
+
+### Size of association based on distance between COJO selected SNPs
+
+```{r, eval = FALSE}
+years_jma %>% 
+  filter(chr == 5) %>% 
+  arrange(chr, pos) %>% 
+  mutate(lag = lag(pos),
+         dist = pos - lag,
+         far = if_else(dist >= 1000000, TRUE, FALSE)) %>% 
+  select(dist, far, everything())
+```
+
+Peak 1: 14015861 +/- 1000000
+Peak 2: (16147741-1000000) to (16670962+1000000)
+Peak 3: 18767155 +/- 1000000
+ENSBTAG00000020784 = prostaglandin reductase 2 pseudogene (LOC782748)
+
+```{r, eval = FALSE}
+gene %>% 
+  filter(CHR == 5) %>% 
+  filter(which != "gxe") %>% 
+  mutate(peak = case_when(15015861 > BP ~ 1,
+                          17670962 > BP & BP > 15147741 ~ 2,
+                          19767155 > BP & BP > 17767155 ~ 3),
+         gene = if_else(!is.na(gene_name), gene_name, gene_id)) %>% 
+  arrange(peak) %>% 
+  select(peak, BP, start_pos, end_pos, gene, which) %>% 
+  group_by(peak) %>% 
+  add_count(gene)
+```
+
+### Lead SNP
+
+* Lead SNP in Metasoft, SNP1101, and COJO results is at 5:18,767,155
+
+```{r, eval = FALSE}
+years_metasoft %>% 
+  filter(chr == 5) %>% 
+  # SNP(s) with largest neglog10q
+  top_n(1, neglog10q) %>% 
+  select(CHR = chr, BP = pos) %>% 
+  find_genes_qtls_around_markers(db_file = gtf,
+                                 marker_file = .,
+                                 method = c("gene"),
+                                 marker = c("snp"),
+                                 interval = 415000) %>% 
+  mutate(start_dist = abs(BP-start_pos),
+         end_dist = abs(BP-end_pos),
+         abs_dist = if_else(start_dist > end_dist, end_dist, start_dist)) %>% 
+  arrange(abs_dist)
+```
+
+## Chromosome 23
+
+```{r, eval=FALSE}
+gene %>% 
+  filter(which != "gxe") %>% 
+  filter(CHR == 23) %>% 
+  mutate(start_dist = abs(BP-start_pos),
+         end_dist = abs(BP-end_pos),
+         Distance = if_else(start_dist > end_dist, as.integer(end_dist), as.integer(start_dist)),
+         Gene = if_else(!is.na(gene_name), gene_name, gene_id),
+         SNP = glue("{CHR}:{scales::comma(BP)}"),
+         Start = scales::comma(start_pos),
+         End = scales::comma(end_pos),
+         Distance = scales::comma(Distance, digits = 0),
+         Distance = str_remove(Distance, "\\.0")) %>% 
+  select(which, SNP, Gene, Start, End, Distance) %>% 
+  add_count(Gene)
+```
+
+```{r, eval=FALSE}
+gene %>% 
+  filter(which == "cojo") %>% 
+  filter(CHR == 23) %>% 
+  left_join(years_jma %>% 
+              select(CHR = chr, BP = pos, AF = freq, `p-value` = p, `LD r` = ld_r)) %>% 
+  mutate(start_dist = abs(BP-start_pos),
+         end_dist = abs(BP-end_pos),
+         Distance = if_else(start_dist > end_dist, as.integer(end_dist), as.integer(start_dist)),
+         Gene = if_else(!is.na(gene_name), gene_name, gene_id),
+         SNP = glue("{CHR}:{scales::comma(BP)}"),
+         Start = scales::comma(start_pos),
+         End = scales::comma(end_pos),
+         Distance = scales::comma(Distance, digits = 0),
+         Distance = str_remove(Distance, "\\.0")) %>% 
+  select(which, SNP, Gene, `p-value`, AF, `LD r`, Start, End, Distance) %>% 
+  add_count(Gene) %>% 
+  arrange(`p-value`)
+```
+
+```{r}
+years_jma %>% 
+  filter(chr == 23) %>% 
+  arrange(pos) %>% 
+  slice(1) %>% 
+  select(CHR = chr, BP = pos) %>% 
+  find_genes_qtls_around_markers(db_file = gtf,
+                                 marker_file = .,
+                                 method = c("gene"),
+                                 marker = c("snp"),
+                                 interval = 415000)
+```
+
+
+### CDKAL1
+
+```{r, eval = FALSE}
+gene0 %>% 
+  filter(which == "cojo") %>% 
+  filter(gene_name == "CDKAL1") %>% 
+  select(chr = CHR, pos = BP) %>% 
+  left_join(years_jma)
+```
+
+## GxE
+
+### Chromosome 3
+
+```{r, eval=FALSE}
+gene %>% 
+  filter(which == "gxe") %>% 
+  filter(CHR == 3) %>% 
+  mutate(start_dist = abs(BP-start_pos),
+         end_dist = abs(BP-end_pos),
+         Distance = if_else(start_dist > end_dist, as.integer(end_dist), as.integer(start_dist)),
+         Gene = if_else(!is.na(gene_name), gene_name, gene_id),
+         SNP = glue("{CHR}:{scales::comma(BP)}"),
+         Start = scales::comma(start_pos),
+         End = scales::comma(end_pos),
+         Distance = scales::comma(Distance, digits = 0),
+         Distance = str_remove(Distance, "\\.0")) %>% 
+  select(which, SNP, Gene, Start, End, Distance) %>% 
+  add_count(Gene) %>% 
+  arrange(desc(n))
+```
+
+```{r}
+gxe_metasoft_dl %>% 
+  # SNP(s) with largest neglog10q
+  top_n(1, neglog10q_re2) %>% 
+  select(CHR = chr, BP = pos) %>% 
+  find_genes_qtls_around_markers(db_file = gtf,
+                                 marker_file = .,
+                                 method = c("gene"),
+                                 marker = c("snp"),
+                                 interval = search_space) 
+```
+
+### Other
+
+```{r}
+gene %>% 
+  filter(gene_name == "CDKAL1")
+```
+
+
+# Supplementary files
+
+## Genes within `r search_space/1000` Kb of GWAA hits
+
+```{r}
+gene %>% 
+  select(analysis = which, chr, gwaa_hit_bp = BP, gene_start_bp = start_pos, gene_end_bp = end_pos, gene_id, gene_name, gene_biotype) %>% 
+  mutate(analysis = case_when(analysis == "cojo" ~ "COJO of main effect meta-analysis",
+                              analysis == "fixed9" ~ "Main effect, DEBVs",
+                              analysis == "metasoft" ~ "Main effect, meta-analysis",
+                              analysis == "gxe_day_length" ~ "GxE meta-analysis, day length",
+                              analysis == "gxe_temp" ~ "GxE meta-analysis, temperature")) %>% 
+  arrange(chr, gene_start_bp, analysis) %>% 
+  write_csv(here::here(glue("data/derived_data/annotation/genes_within_{search_space/1000}kb.csv")),
+            na = "")
+```
+
+## Gene ontology enrichment results
+
+```{r, eval = FALSE}
+
+gene_result %>% 
+  mutate(genes = purrr::map_chr(.x = intersection,
+                                ~ str_split(.x, ",") %>% 
+                                  flatten_chr() %>% 
+                                  tibble::as_tibble_col(column_name = "gene_id") %>% 
+                                  left_join(gene %>% 
+                                              distinct(gene_id, gene_name, CHR, start_pos)) %>% 
+                                  mutate(gene = if_else(!is.na(gene_name), gene_name, gene_id)) %>% 
+                                  arrange(CHR, start_pos) %>% 
+                                  distinct(gene) %>%
+                                  pull(gene) %>% 
+                                  glue_collapse(sep = "; "))) %>% 
+  mutate(analysis = case_when(which == "cojo" ~ "COJO of main effect meta-analysis",
+                              which == "fixed9" ~ "Main effect, DEBVs",
+                              which == "metasoft" ~ "Main effect, meta-analysis",
+                              which == "gxe_day_length" ~ "GxE meta-analysis, day length",
+                              which == "gxe_temp" ~ "GxE meta-analysis, temperature")) %>% 
+  select(analysis, term_name, source, p_value, intersection_size, intersecting_genes = genes) %>% 
+  write_csv(here::here("data/derived_data/annotation/gene_enrich.csv"))
+```
+
+## QTL enrichment results
+
+```{r, eval=FALSE}
+qtl_enrich %>% 
+  filter(0.05 > adj.pval) %>%
+  filter(QTL_type != "Milk") %>% 
+  filter(N_QTLs > 1) %>% 
+  arrange(adj.pval) %>% 
+  left_join(qtl %>% 
+              select(CHR, BP, QTL = trait_ID, QTL_ID, which)) %>% 
+  group_by(QTL, N_QTLs, adj.pval, which) %>%
+  mutate(n_snp = n_distinct(CHR, BP)) %>% 
+  ungroup() %>% 
+  filter(n_snp > 1) %>% 
+  group_by(QTL, N_QTLs, adj.pval, which, n_snp) %>%
+  tidyr::nest() %>% 
+  ungroup() %>% 
+  mutate(unique_chr = purrr::map_chr(.x = data, 
+                                 ~ .x %>% 
+                                   arrange(CHR, BP) %>% 
+                                   mutate(chr_bp = glue("{CHR}:{scales::comma(BP)}")) %>% 
+                                   distinct(chr_bp) %>% 
+                                   pull(chr_bp) %>% 
+                                   glue_collapse(sep = "; "))) %>% 
+  arrange(which, adj.pval) %>% 
+  filter(n_snp > 1) %>% 
+  mutate(Analysis = case_when(which == "cojo" ~ "COJO of main effect meta-analysis",
+                              which == "fixed9" ~ "Main effect, DEBVs",
+                              which == "metasoft" ~ "Main effect, meta-analysis",
+                              which == "gxe_day_length" ~ "GxE meta-analysis, day length",
+                              which == "gxe_temp" ~ "GxE meta-analysis, temperature")) %>% 
+  select(Analysis, `QTL name` = QTL, `Adjusted p-value` = adj.pval, `N annotations` = N_QTLs, `N SNPs` = n_snp, SNPs = unique_chr) %>% 
+  write_csv(here::here("data/derived_data/annotation/qtl_enrich.csv"))
+```
+

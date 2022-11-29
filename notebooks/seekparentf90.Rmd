@@ -1,0 +1,179 @@
+---
+title: "Pedigree corrections using `seekparentf90`"
+author: "Harly Durbin"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(dplyr)
+library(ggplot2)
+```
+
+# Notes & questions
+
+* Trio Header: Parent-Check                 Animal                 Sire                  Dam  #Conflict Total_SNP %Conflict  #Call_An #Call_Sire  #Call_Dam #Call_Trio   #NoCall_An #NoCall_Sire  #NoCall_Dam #NoCall_Trio    CR_Anim    CR_Sire     CR_Dam    CR_Trio   Result
+
+# Setup
+
+```{r, warning=FALSE, message=FALSE}
+cleaned <- read_rds(here::here("data/derived_data/import_join_clean/cleaned.rds"))
+```
+
+```{r, warning=FALSE, message=FALSE}
+full_ped <- read_rds(here::here("data/derived_data/3gen/full_ped.rds"))
+```
+
+```{r, warning = FALSE, message=FALSE}
+conflicts <-
+  read_table2(here::here("data/derived_data/seekparentf90/Parent_Progeny_Conflicts.condensed.txt"),
+              col_names = FALSE) %>% 
+  select(comparison = X1,
+         full_reg = X2, 
+         parent_reg = X3,
+         n_conflicts = X4, 
+         percent_conflicts = X6) 
+
+```
+
+```{r, warning = FALSE, message=FALSE}
+trio_conflicts <-
+  read_table2(here::here("data/derived_data/seekparentf90/Parent_Progeny_Conflicts_Trio.condensed.txt"),
+              col_names = FALSE) %>% 
+  filter(X1 == "Animal-Sire-Dam") %>% 
+  select(full_reg = X2, 
+         sire_reg = X3,
+         dam_reg = X4,
+         trio_conflicts = X5, 
+         percent_trio_conflicts = X7,
+         trio_result = X20) %>% 
+  left_join(read_table2(here::here("data/derived_data/seekparentf90/Parent_Progeny_Conflicts_Trio.condensed.txt"),
+                        col_names = FALSE) %>% 
+              filter(X1 == "Animal-Sire") %>% 
+              select(full_reg = X2,
+                     sire_reg = X3,
+                     sire_conflicts = X4,
+                     percent_sire_conflicts = X6,
+                     sire_result = X16)) %>% 
+  left_join(read_table2(here::here("data/derived_data/seekparentf90/Parent_Progeny_Conflicts_Trio.condensed.txt"),
+                        col_names = FALSE) %>% 
+              filter(X1 == "Animal-Dam") %>% 
+              select(full_reg = X2,
+                     dam_reg = X3,
+                     dam_conflicts = X4,
+                     percent_dam_conflicts = X6,
+                     dam_result = X16)) %>% 
+  select(contains("reg"), contains("result"), contains("percent"), contains("conflicts"))
+```
+
+# Summary
+
+```{r}
+conflicts %>%
+  filter(2.5 >= percent_conflicts) %>% 
+  ggplot(aes(x = percent_conflicts)) +
+  geom_histogram(bins = 40) + 
+  geom_vline(xintercept = 0.5) +
+  labs(x = "Percent discordant", 
+       y = "N comparisons")
+```
+
+```{r}
+single_tally <-
+  conflicts %>% 
+  filter(0.5 > percent_conflicts) %>% 
+  group_by(parent_reg) %>% 
+  summarise(pass_single = n()) %>% 
+  full_join(conflicts %>% 
+              filter(percent_conflicts >= 0.5) %>% 
+              group_by(parent_reg) %>% 
+              summarise(fail_single = n())) %>% 
+  arrange(desc(fail_single)) %>% 
+  replace_na(list(pass_single = 0, fail_single = 0)) 
+```
+
+```{r}
+trio_tally <-
+  bind_rows(trio_conflicts %>% 
+              select(full_reg,
+                     parent_reg = sire_reg,
+                     percent_conflicts = percent_sire_conflicts),
+            trio_conflicts %>% 
+              select(full_reg,
+                     parent_reg = dam_reg,
+                     percent_conflicts = percent_dam_conflicts)) %>% 
+  filter(0.5 > percent_conflicts) %>% 
+  group_by(parent_reg) %>% 
+  summarise(pass_trio = n()) %>% 
+  full_join(bind_rows(trio_conflicts %>% 
+                        select(full_reg,
+                               parent_reg = sire_reg,
+                               percent_conflicts = percent_sire_conflicts),
+                      trio_conflicts %>% 
+                        select(full_reg,
+                               parent_reg = dam_reg,
+                               percent_conflicts = percent_dam_conflicts)) %>% 
+              filter(percent_conflicts >= 0.5) %>% 
+              group_by(parent_reg) %>% 
+              summarise(fail_trio = n())) %>% 
+  replace_na(list(pass_trio = 0, fail_trio = 0))
+```
+
+# Step 1: remove incorrect genotypes
+
+* At what number of incorrect failed comparisons parent-progeny comparisons do you exclude an animal???
+* Remove if more than 2 trio failures + greater than 50% of all trio comparisons were failures
+
+```{r}
+trio_tally %>% 
+  mutate(percent_fail = purrr::map2_dbl(.x = pass_trio,
+                                        .y = fail_trio,
+                                        ~ .y/sum(.x, .y))) %>% 
+  filter(fail_trio > 2) %>% 
+  filter(percent_fail > 0.5)
+```
+
+```{r}
+blacklist <-
+  read_table2(here::here("data/derived_data/seekparentf90/iter1/parentage_conflicts.removelist"),
+            col_names = FALSE) %>% 
+  select(parent_reg = X1) %>% 
+  bind_rows(trio_tally %>% 
+              mutate(percent_fail = purrr::map2_dbl(.x = pass_trio,
+                                        .y = fail_trio,
+                                        ~ .y/sum(.x, .y))) %>% 
+              filter(fail_trio > 2) %>% 
+              filter(percent_fail > 0.5)) %>% 
+  distinct(parent_reg)
+```
+
+```{r}
+blacklist %>% 
+  mutate(fid = parent_reg) %>% 
+  select(parent_reg, fid) %>% 
+  write_tsv(here::here("data/derived_data/seekparentf90/parentage_conflicts.removelist"),
+            col_names = FALSE)
+```
+
+# Step 2: remove pedigree connections
+
+```{r}
+conflicts %>% 
+  filter(percent_conflicts > 0.5) %>% 
+  mutate(wrong_sire = if_else(stringr::str_detect(comparison, "Sire"),
+                              "0",
+                              NA_character_),
+         wrong_dam = if_else(stringr::str_detect(comparison, "Dam"),
+                              "0",
+                              NA_character_)) %>%
+  bind_rows(read_csv(here::here("data/derived_data/seekparentf90/iter1/parentage_conflicts.csv"),
+                     col_types = cols(.default = "c"))) %>% 
+  filter(!parent_reg %in% blacklist$parent_reg) %>% 
+  select(full_reg, contains("wrong")) %>% 
+  distinct() %>% 
+  write_csv(here::here("data/derived_data/seekparentf90/parentage_conflicts.csv"),
+            na = "")
+  
+```
+

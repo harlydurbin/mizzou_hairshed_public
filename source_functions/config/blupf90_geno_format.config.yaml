@@ -1,0 +1,13 @@
+rules: ['remove_list_key', 'qc', 'mapfile', 'recode_a', 'remove_spaces', 'append_id', 'fwf']
+
+geno_prefix: "data/raw_data/geno_dump/200924_HairShed.850K"
+
+plink_module: "plink/plink-1.90b"
+
+plink_nt: 12
+
+r_module: "r/r-3.6.2-python-2.7.14-tk"
+
+sample_table: "data/raw_data/import_join_clean/200820_sample_sheet.csv"
+
+maf: "0.01"

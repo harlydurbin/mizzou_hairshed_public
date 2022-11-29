@@ -1,0 +1,17 @@
+rules: ['setup_data', 'copy_par', 'renumf90', 'airemlf90', 'cleanup']
+
+r_module: "r/r-3.6.2-python-2.7.14-tk"
+
+mpi_module: "openmpi/openmpi-3.1.3-intel-16.0.2"
+
+renumf90_path: "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/source_functions/renumf90"
+
+aireml_path: "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/source_functions/airemlf90"
+
+geno_prefix: "data/raw_data/geno_dump/200924_HairShed.850K"
+
+# model: ['fixed1', 'fixed2', 'fixed3', 'fixed4', 'fixed5', 'fixed6', 'fixed7', 'fixed8', 'fixed9', 'fixed10', 'fixed11', 'fixed12', 'fixed13', 'an1', 'bg1', 'hfd1', 'igs1']
+
+# grep -Fwf data/derived_data/aireml_varcomp/hfd1/pull_list.txt data/raw_data/geno_dump/200924_HairShed.850K.fwf.txt | awk '{printf "%-25s %s\n", $1, $2}' > data/derived_data/aireml_varcomp/acctest/genotypes.hfd1.txt
+
+model: ['gxe_gwas']

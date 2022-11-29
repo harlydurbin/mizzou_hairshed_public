@@ -1,0 +1,36 @@
+{
+    "__default__":
+    {
+        "p" : "BioCompute,htc4,hpc5",
+        "account" : "animalsci",
+        "mem" : 1G,
+        "c": 1,
+        "t": "01:00:00",
+        "o": "log/slurm_out/gxe_gwas/{rule}/{wildcards}.%j.out",
+        "mail-user" : "hjdurbin@mail.missouri.edu",
+        "mail-type" : "NONE"
+    },
+    "gemma_grm":
+    {
+        "t": "12:00:00",
+        "mem" : 100G,
+        "mail-type": "END"
+    },
+    "setup_data":
+    {
+        "t": "01:00:00",
+        "mem": 6G,
+        "p": "General,Lewis,BioCompute,htc4,hpc5"
+    },
+    "copy_plink":
+    {
+        "t": "01:00:00",
+        "p" : "General,Lewis,BioCompute,htc4,hpc5"
+    },
+    "gemma":
+    {
+        "t": "48:00:00",
+        "mem" : 5G,
+        "mail-type" : "END"
+    }
+}

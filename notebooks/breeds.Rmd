@@ -1,0 +1,435 @@
+---
+title: "Breed-specific ssGBLUP, GWAS, and meta-analysis"
+author: "Harly Durbin"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(readr)
+library(tidyr)
+library(stringr)
+library(dplyr)
+library(ggplot2)
+library(glue)
+library(readxl)
+library(magrittr)
+library(tidylog)
+library(rlang)
+
+source(here::here("source_functions/melt_aireml.R"))
+source(here::here("source_functions/calculate_heritability.R"))
+source(here::here("source_functions/hair_manhattan.R"))
+source(here::here("source_functions/ggqq.R"))
+
+options(scipen = 999)
+```
+
+# Notes & questions
+
+[Miller Stone map colors](https://jrnold.github.io/ggthemes/reference/tableau_color_pal.html)
+
+* Angus: Blues ("#4f6980", "#849db1")
+* IGS/Simmental: Dark greens ("#638b66", "#a2ceaa")
+* Hereford: Orange/yellow ("#f47942", "#fbb04e")
+* Brangus: Light greens ("#bfbb60", "#d7ce9f")
+
+## Datasets
+
+* Hereford
+* Participating IGS breed associations
+    + RAN, SIM, GEL, SH, CHI
+* Brangus
+* Angus
+    
+# Setup
+
+```{r}
+breed_key <- 
+  read_rds(here::here("data/derived_data/breed_key/breed_key.rds"))
+```
+
+## Raw GWAS results
+
+```{r, warning=FALSE, message=FALSE}
+breeds_snp1101 <-
+  c("hfd1", "an1", "bg1", "igs1") %>% 
+  purrr::set_names() %>% 
+  purrr::map_dfr(~ read_table2(here::here(glue("data/derived_data/snp1101/{.x}/out/gwas_ssr_{.x}_bvs_p.txt")))  %>%
+                   janitor::clean_names() %>%
+                   mutate(neglog10p = -log10(p_value),
+                          neglog10q = -log10(qvalue::qvalue(p_value)$qvalues),
+                          fdr_5 = qvalue::qvalue(p_value, fdr.level = 0.05)$significant, 
+                          fdr_1 = qvalue::qvalue(p_value, fdr.level = 0.01)$significant),
+                 .id = "dataset")
+```
+
+# Heritability and repeatability
+
+```{r, warning=FALSE, message=FALSE}
+purrr::map2_dfr(.x = c("hfd1", "an1", "bg1", "igs1"),
+                .y = c("Hereford", "Angus", "Brangus", "IGS breeds"),
+                ~ read_table2(here::here(glue("data/derived_data/aireml_varcomp/{.x}/data.txt")),
+                              col_names = FALSE) %>% 
+                  summarise(`n phenotypes` = n(),
+                            `n phenotyped animals` = n_distinct(X1),
+                            key = .y)) %>% 
+  left_join(purrr::map2_dfr(.x = c("hfd1", "an1", "bg1", "igs1"),
+                            .y = c("Hereford", "Angus", "Brangus", "IGS breeds"),
+                            ~ read_table2(here::here(glue("data/derived_data/aireml_varcomp/{.x}/pull_list.txt")),
+                                          col_names = FALSE) %>% 
+                              summarise(`n genotyped` = n(),
+                                        key = .y))) %>% 
+  mutate_if(is.numeric, ~ scales::comma(.)) %>% 
+  select(key, everything()) 
+```
+
+```{r, warning = FALSE, message = FALSE}
+breed_h2 <-
+  purrr::map2_dfr(.x = c("hfd1", "an1", "bg1", "igs1", "fixed9"),
+                  .y = c("Hereford", "Angus", "Brangus", "IGS breeds", "Full dataset"),
+                  ~ melt_aireml(path = here::here(glue("data/derived_data/aireml_varcomp/{.x}/airemlf90.{.x}.log")),
+                                effect2 = c("hair_dir"),
+                                effect3 = c("hair_pe"),
+                                resids = c("hair_res")) %>% 
+                    univ_heritability(abbrv = "hair",
+                                      desc = .y,
+                                      pe = TRUE))
+
+```
+
+```{r}
+breed_h2 %>% 
+  left_join(purrr::map2_dfr(.x = c("hfd1", "an1", "bg1", "igs1", "fixed9"),
+                            .y = c("Hereford", "Angus", "Brangus", "IGS breeds", "Full dataset"),
+                            ~ melt_aireml(path = here::here(glue("data/derived_data/aireml_varcomp/{.x}/airemlf90.{.x}.log")),
+                                          effect2 = c("hair_dir"),
+                                          effect3 = c("hair_pe"),
+                                          resids = c("hair_res")) %>% 
+                              mutate(key = .y)) %>% 
+              filter(val1 == val2) %>% 
+              select(-val1) %>% 
+              tidyr::pivot_wider(values_from = var_cov,
+                                 names_from = val2,
+                                 id_cols = key)) %>% 
+  select(key, `Direct var.` = hair_dir, `PE var.` = hair_pe, `Residual var.` = hair_res, `Direct h2`, Repeatability) %>% 
+  add_row(key = "AGI dataset", `Direct var.` = 0.37679, `PE var.` = 0.039171, `Residual var.` = 0.53274, `Direct h2` = 0.40, Repeatability = 0.44)
+```
+
+# GWAS
+
+```{r}
+breeds_snp1101 %>% 
+  filter(fdr_1 == TRUE) %>% 
+  group_by(dataset) %>% 
+  tally()
+```
+
+```{r}
+breeds_snp1101 %>% 
+  filter(fdr_5 == TRUE) %>% 
+  group_by(chr, pos) %>% 
+  tally() %>% 
+  filter(n > 1)
+```
+
+```{r}
+breeds_snp1101 %>% 
+  filter(fdr_1 == TRUE) %>% 
+  group_by(dataset) %>% 
+  summarise(`Min @ FDR = 0.01` = min(neglog10q))
+```
+
+```{r}
+breeds_snp1101 %>% 
+  filter(fdr_5 == TRUE) %>% 
+  group_by(dataset) %>% 
+  summarise(`Min @ FDR = 0.05` = min(neglog10q))
+```
+
+## Angus
+
+```{r, fig.width = 11, fig.height = 6.16}
+hair_manhattan(df = breeds_snp1101 %>% 
+                 filter(dataset == "an1") %>% 
+                 filter(0.1 > p_value),
+               y_var = neglog10q, 
+               y_lab = "-log10(q-value)",
+               sigline = 2.011214,
+               color1 = "#4f6980",
+               color2 = "#849db1") +
+  geom_hline(yintercept = 1.301641, color = "blue")
+```
+
+```{r, fig.width = 11, fig.height = 6.16}
+ggsave(filename = here::here("figures/breeds/an1_snp1101.q.unkparents.png"), height = 6.16, width = 11)
+```
+
+```{r, fig.width = 11, fig.height = 6.16}
+hair_manhattan(df = breeds_snp1101 %>% 
+                 filter(dataset == "an1") %>% 
+                 filter(0.01 > p_value),
+               y_var = neglog10p, 
+               y_lab = "-log10(p-value)",
+               sigline = 5,
+               color1 = "#4f6980",
+               color2 = "#849db1")
+```
+
+```{r, fig.width = 11, fig.height = 6.16}
+ggsave(filename = here::here("figures/breeds/an1_snp1101.p.png"), height = 6.16, width = 11)
+```
+
+```{r}
+ggqq(pvector = breeds_snp1101[breeds_snp1101$dataset == "an1", "p_value"][[1]])
+```
+
+```{r}
+ggsave(here::here("figures/breeds/an1_snp1101.Q-Q.png"))
+```
+
+## ~~Brangus~~
+
+Under-powered, removing results from manuscript
+
+```{r, fig.width = 11, fig.height = 6.16, eval = FALSE}
+hair_manhattan(df = breeds_snp1101 %>% 
+                 filter(dataset == "bg1") %>% 
+                 filter(0.01 > p_value),
+               y_var = neglog10q, 
+               y_lab = "-log10(q-value)",
+               sigline = 1,
+               color1 = "#bfbb60",
+               color2 = "#d7ce9f")
+```
+
+```{r, fig.width = 11, fig.height = 6.16, eval = FALSE}
+ggsave(filename = here::here("figures/breeds/bg11_snp1101.q.png"), height = 6.16, width = 11)
+```
+
+```{r, fig.width = 11, fig.height = 6.16, eval = FALSE}
+hair_manhattan(df = breeds_snp1101 %>% 
+                 filter(dataset == "bg1") %>% 
+                 filter(0.01 > p_value),
+               y_var = neglog10p, 
+               y_lab = "-log10(p-value)",
+               sigline = 5,
+               color1 = "#bfbb60",
+               color2 = "#d7ce9f")
+```
+
+```{r, fig.width = 11, fig.height = 6.16, eval = FALSE}
+ggsave(filename = here::here("figures/breeds/bg1_snp1101.p.png"), height = 6.16, width = 11)
+```
+
+```{r, eval=FALSE}
+ggqq(pvector = breeds_snp1101[breeds_snp1101$dataset == "bg1", "p_value"][[1]])
+```
+
+```{r, eval=FALSE}
+ggsave(here::here("figures/breeds/bg1_snp1101.Q-Q.png"))
+```
+
+## ~~Hereford~~
+
+Under-powered, removing results from manuscript
+
+```{r, fig.width = 11, fig.height = 6.16}
+hair_manhattan(df = breeds_snp1101 %>% 
+                 filter(dataset == "hfd1") %>% 
+                 filter(0.01 > p_value),
+               y_var = neglog10q, 
+               y_lab = "-log10(q-value)",
+               sigline = 1,
+               color1 = "#f47942",
+               color2 = "#fbb04e")
+```
+
+```{r, fig.width = 11, fig.height = 6.16}
+ggsave(filename = here::here("figures/breeds/hfd1_snp1101.q.png"), height = 6.16, width = 11)
+```
+
+```{r, fig.width = 11, fig.height = 6.16}
+hair_manhattan(df = breeds_snp1101 %>% 
+                 filter(dataset == "hfd1") %>% 
+                 filter(0.01 > p_value),
+               y_var = neglog10p, 
+               y_lab = "-log10(p-value)",
+               sigline = 5,
+               color1 = "#f47942",
+               color2 = "#fbb04e")
+```
+
+```{r, fig.width = 11, fig.height = 6.16}
+ggsave(filename = here::here("figures/breeds/hfd1_snp1101.p.png"), height = 6.16, width = 11)
+```
+
+```{r}
+ggqq(pvector = breeds_snp1101[breeds_snp1101$dataset == "hfd1", "p_value"][[1]])
+```
+
+```{r}
+ggsave(here::here("figures/breeds/hfd1_snp1101.Q-Q.png"))
+```
+
+## IGS
+
+```{r, fig.width = 11, fig.height = 6.16}
+hair_manhattan(df = breeds_snp1101 %>% 
+                 filter(dataset == "igs1") %>% 
+                 filter(0.01 > p_value),
+               y_var = neglog10q, 
+               y_lab = "-log10(q-value)",
+               sigline = 2.013326,
+               color1 = "#638b66",
+               color2 = "#a2ceaa") +
+  geom_hline(yintercept = 1.301422, color = "blue")
+```
+
+```{r, fig.width = 11, fig.height = 6.16}
+ggsave(filename = here::here("figures/breeds/igs1_snp1101.q.png"), height = 6.16, width = 11)
+```
+
+```{r, fig.width = 11, fig.height = 6.16}
+hair_manhattan(df = breeds_snp1101 %>% 
+                 filter(dataset == "igs1") %>% 
+                 filter(0.01 > p_value),
+               y_var = neglog10p, 
+               y_lab = "-log10(p-value)",
+               sigline = 5,
+               color1 = "#638b66",
+               color2 = "#a2ceaa")
+```
+
+```{r, fig.width = 11, fig.height = 6.16}
+ggsave(filename = here::here("figures/breeds/igs1_snp1101.p.png"), height = 6.16, width = 11)
+```
+
+```{r}
+ggqq(pvector = breeds_snp1101[breeds_snp1101$dataset == "igs1", "p_value"][[1]])
+```
+
+```{r}
+ggsave(here::here("figures/breeds/igs1_snp1101.Q-Q.png"))
+```
+
+# Multi-panel breeds Manhattan plot
+
+```{r}
+overlap <-
+  breeds_snp1101 %>% 
+  filter(neglog10p > 5) %>% 
+  group_by(chr, pos) %>% 
+  filter(n() > 1) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  left_join(breeds_snp1101 %>% 
+              filter(neglog10p > 5) %>% 
+              select(chr, pos, dataset)) %>% 
+  mutate(chr_color = "black")
+
+```
+
+```{r, fig.width=6, fig.height=12}
+practice <-
+  breeds_snp1101 %>% 
+  filter(0.9 >= p_value) %>% 
+  chr_len() %>% 
+  full_join(overlap) %>% 
+  mutate(chr_color = case_when(!is.na(chr_color) ~ chr_color,
+                               dataset == "an1" & chr %in% c(seq(from = 1,
+                                                                 to = 29,
+                                                                 by = 2)) ~ "#4f6980",
+                               dataset == "an1" & chr %in% c(seq(from = 2,
+                                                                 to = 29,
+                                                                 by = 2)) ~ "#849db1",
+                               dataset == "bg1" & chr %in% c(seq(from = 1,
+                                                                 to = 29,
+                                                                 by = 2)) ~ "#bfbb60",
+                               dataset == "bg1" & chr %in% c(seq(from = 2,
+                                                                 to = 29,
+                                                                 by = 2)) ~ "#d7ce9f",
+                               dataset == "hfd1" & chr %in% c(seq(from = 1,
+                                                                 to = 29,
+                                                                 by = 2)) ~ "#f47942",
+                               dataset == "hfd1" & chr %in% c(seq(from = 2,
+                                                                 to = 29,
+                                                                 by = 2)) ~ "#fbb04e",
+                               dataset == "igs1" & chr %in% c(seq(from = 1,
+                                                                 to = 29,
+                                                                 by = 2)) ~ "#638b66",
+                               dataset == "igs1" & chr %in% c(seq(from = 2,
+                                                                 to = 29,
+                                                                 by = 2)) ~ "#a2ceaa"),
+         dataset = case_when(dataset == "an1" ~ "Angus (n = 3,268)",
+                             dataset == "bg1" ~ "Brangus (n = 883)",
+                             dataset == "hfd1" ~ "Hereford (n = 1,055)",
+                             dataset == "igs1" ~ "IGS (n = 4,722)"))
+```
+
+```{r}
+axisdf <-
+  practice %>%
+  group_by(chr) %>%
+  summarize(center = (max(BPcum) + min(BPcum)) / 2) 
+```
+
+```{r, fig.width=9, fig.height=12}
+ggplot(practice) +
+  geom_point(aes(x = BPcum,
+                 y = neglog10p,
+                 color = chr_color,
+                 fill = chr_color),
+                 alpha = 0.75) +
+  scale_color_identity() +
+  geom_point(data = base::subset(practice, chr_color == 'black'),
+             aes(x = BPcum,
+                 y = neglog10p,
+                 color = "black"),
+             alpha = 1) +
+  scale_fill_identity() +
+  scale_x_continuous(label = axisdf$chr[c(TRUE, FALSE)],
+                     breaks = axisdf$center[c(TRUE, FALSE)]) +
+  theme_classic() +
+  theme(plot.title = element_text(size = 24,
+                                  face = "italic",
+                                  margin = margin(t = 0,
+                                                  r = 0,
+                                                  b = 13,
+                                                  l = 0)),
+        plot.subtitle = element_text(size = 20,
+                                     face = "italic",
+                                     margin = margin(t = 0,
+                                                     r = 0,
+                                                     b = 13,
+                                                     l = 0)),
+        axis.title = element_text(size = 18),
+        axis.title.y = element_text(margin = margin(t = 0,
+                                                    r = 13,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.title.x = element_text(margin = margin(t = 13,
+                                                    r = 0,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.text = element_text(size = 14),
+        legend.text = element_text(size = 14),
+        strip.text = element_text(size = 14)) +
+  geom_hline(yintercept = 5,
+             color = "red",
+             size = 0.25) +
+  labs(x = NULL,
+       y = latex2exp::TeX("$-log_{10}(p-value)$")) +
+  facet_wrap(~ dataset,
+             nrow = 4)
+```
+
+```{r}
+ggsave(here::here("figures/breeds/an1bg1hfd1igs1_snp1101.p.png"), width = 9, height = 12)
+```

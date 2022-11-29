@@ -1,0 +1,40 @@
+title
+       "fixed9";
+
+gfile
+       "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/data/raw_data/geno_dump/200924_HairShed.850K.fwf.txt";
+
+mapfile
+       "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/data/raw_data/geno_dump/200924_HairShed.850K.chrinfo.txt";
+
+// pedfile
+      // "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/data/derived_data/snp1101/fixed9/ped.txt";
+
+traitfile
+       name "fixed9_bvs"
+       file "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/data/derived_data/snp1101/fixed9/trait.txt"
+       est 1
+       //h2 0.37
+       skip 1;
+
+qc
+       maf_range 0.0 0.5;
+
+//kinship
+       //matrix
+       //name "hair_grm"
+       //method vanraden;
+
+gwas ssr
+       kinship file "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/data/derived_data/snp1101/gmtx_hair_grm.bin"
+       wt rel
+       maf_range 0.0 0.5
+       mca gwise fdr
+       plot
+       plot qq;
+
+nthread
+       32;
+
+output_folder
+       "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/data/derived_data/snp1101/fixed9/out";

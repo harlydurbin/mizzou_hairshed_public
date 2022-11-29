@@ -1,0 +1,17 @@
+rules: ['gemma_grm', 'setup_data', 'copy_plink', 'gemma']
+
+r_module: "r/r-3.6.2-python-2.7.14-tk"
+
+plink_module: "plink/plink-high-contig-1.90p"
+
+mpi_module: "openmpi/openmpi-3.1.3-intel-16.0.2"
+
+gemma_path: "source_functions/gemma-0.98.3-linux-static"
+
+plink_nt: 12
+
+geno_prefix: "data/raw_data/geno_dump/200924_HairShed.850K"
+
+year: ['2016', '2017', '2018', '2019', 'random']
+
+var: ['day_length', 'temp']

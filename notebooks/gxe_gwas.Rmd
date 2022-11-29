@@ -1,0 +1,472 @@
+---
+title: "GEMMA GxE GWAS"
+author: "Harly Durbin"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(tidyr)
+library(stringr)
+library(dplyr)
+library(glue)
+library(magrittr)
+library(lubridate)
+library(ggplot2)
+library(patchwork)
+
+source(here::here("source_functions/hair_manhattan.R"))
+source(here::here("source_functions/ggqq.R"))
+source(here::here("source_functions/gcif.R"))
+
+# I can't remember numbers and have to re-calculate this every time so
+q_fdr5 <- -log10(.05)
+q_fdr1 <- -log10(.01)
+```
+
+# Notes & questions
+
+* ~~Fit fixed effects directly in GEMMA, dummy coded~~ Calculate breeding values using AIREML, subtract estimated CG BLUE from phenotype --> use that adjusted phenotype in GEMMA
+    + ~~Column of 1s for mean in GEMMA~~
+    + ~~Calving season, age group, fescue~~
+* Okay that I calculated CG effect in one go with all years data rather than 4 separate analyses? Figured it would be more accurate as more information included
+* Need to have phenotype file and genotype file in same order
+    + ~~Phenotype in fam file - make fam manually then use `--keep` to subset genotypes?~~
+    + Set animals in GRM but no phenotypes as NA
+
+---  
+    
+Tried [GxE test using robust variance estimates](https://epstein-software.github.io/robust-joint-interaction/) before realizing it didn't fit any sort of relatedness matrix. Could fit PCs instead?
+
+* Unlike GEMMA, needs every individual to have a phenotype so subset PLINK files to 2018 day length for testing purposes
+* Installed `Rserve` via conda (otherwise, would have to run in an interactive session on Lewis)
+
+```
+# Default PLINK module doesn't allow R plugins
+module load plink/plink-high-contig-1.90p
+R CMD Rserve --no-save
+plink --bfile data/derived_data/robust_joint_gxe/test --threads 12 --allow-no-sex --cow --double-id --covar data/derived_data/robust_joint_gxe/test.cov --R source_functions/robust-joint-int-plugin.R
+```
+
+# Setup
+
+## GEMMA GxE GWAS
+
+```{r, warning=FALSE, message = FALSE}
+gxe_gwas <-
+  purrr::map2_dfr(.x = rep(c("temp", "day_length"), each = 4),
+                 .y = rep(c(2016, 2017, 2018, 2019), times = 2),
+                 ~ read_table2(here::here(glue("data/derived_data/gxe_gwas/{.x}/{.y}/result.assoc.txt"))) %>% 
+                                 rename(pos = ps) %>% 
+                                 mutate(var = .x,
+                                        year = .y,
+                                        adj_p = gcif(.,
+                                                     adjust_p = TRUE),
+                                        neglog10p = -log10(adj_p),
+                                        q = qvalue::qvalue(adj_p)$qvalues,
+                                        neglog10q = -log10(q)))
+```
+
+## Metasoft
+
+* Input files
+
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+purrr::map(.x = c(2016, 2017, 2018, 2019),
+             ~ gxe_gwas %>% 
+             filter(var == "day_length") %>% 
+             filter(year == .x) %>% 
+             filter(!is.na(beta)) %>% 
+             mutate(b = round(beta, digits = 7),
+                    se = round(se, digits = 7)) %>%
+             select(rs, !!rlang::sym(glue("b_{.x}")) := b, !!rlang::sym(glue("se_{.x}")) := se)) %>% 
+  purrr::reduce(left_join) %>% 
+  mutate_if(is.numeric, as.character) %>% 
+  write_tsv(here::here("data/derived_data/metasoft/day_length/metasoft_in.day_length.txt"),
+            col_names = FALSE)
+```
+
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+purrr::map(.x = c(2016, 2017, 2018, 2019),
+           ~ gxe_gwas %>%
+             filter(var == "temp") %>% 
+             filter(year == .x) %>% 
+             filter(!is.na(beta)) %>% 
+             mutate(b = round(beta, digits = 7),
+                    se = round(se, digits = 7)) %>%
+             select(rs, !!rlang::sym(glue("b_{.x}")) := b, !!rlang::sym(glue("se_{.x}")) := se)) %>% 
+  purrr::reduce(left_join) %>% 
+  mutate_if(is.numeric, as.character) %>% 
+  write_tsv(here::here("data/derived_data/metasoft/temp/metasoft_in.temp.txt"),
+            col_names = FALSE)
+```
+
+* Output files
+
+```{r, warning=FALSE, message=FALSE}
+gxe_metasoft <- 
+  c("temp", "day_length") %>% 
+  purrr::set_names() %>% 
+  purrr::map_dfr(~ read_table2(here::here(glue("data/derived_data/metasoft/{.x}/metasoft_out.{.x}_adj.txt")),
+                               col_types = cols(.default = "d", RSID = "c")) %>% 
+                   janitor::clean_names() %>% 
+                   select(-pvalue_be, -contains("fe")) %>%
+                   left_join(read_table2(here::here(glue("data/derived_data/metasoft/{.x}/metasoft_out.{.x}_adj.txt")),
+                                         skip = 1,
+                                         col_types = "c---------------dddddddd", 
+                                         col_names = c("rsid", "p16", "p17", "p18", "p19", "m16", "m17", "m18", "m19"))) %>% 
+                   mutate(chr = as.numeric(str_extract(rsid, "[[:digit:]]{1,2}(?=:)")),
+                          pos = as.numeric(str_extract(rsid, "(?<=[[:digit:]]{1,2}:)[[:digit:]]+")),
+                          neglog10q_re2 = -log10(qvalue::qvalue(pvalue_re2)$qvalues)),
+                 .id = "var")
+  
+```
+
+# Step 1. Calculate contemporary group BLUEs to pre-adjust hair shedding scores
+
+* One single evaluation using all data 2012-2020
+* Fit single contemporary group effect: `{farm_id + year + calving_season + age_group + toxic_fescue + score_group}` ~~(include `farm_id` but no `score_group`)~~
+    + ~~This ends up meaning that animals with multiple records in the same year have multiple records in a single contemporary group - should I limit to one record per year by randomly choosing a record? Or, add `score_group` back in?~~ Added `score_group` back in
+
+# Step 2. Fit four year-specific GxE GWAS for each day length and temperature using GEMMA
+
+* Using results from in step 1, subtract associated CG BLUE from hair score
+* For animals with multiple records in the same year, randomly choose one record
+
+## Diagnostic
+
+### Q-Q plots pre- and post-genomic control {.tabset}
+
+```{r}
+qq <-
+  gxe_gwas %>% 
+  select(var, year, p_wald, adj_p) %>% 
+  nest(-var, -year) %>% 
+  mutate(pre = purrr::pmap(list(x = data, y = year, z = var),
+                            .f = function(x, y, z) {
+                              x %>% 
+                                pull(p_wald) %>% 
+                                ggqq() +
+                                labs(title = glue("{y} {z} pre-GC"))
+                              }),
+         post = purrr::pmap(list(x = data, y = year, z = var),
+                            .f = function(x, y, z) {
+                              x %>% 
+                                pull(adj_p) %>% 
+                                ggqq() +
+                                labs(title = glue("{y} {z} post-GC"))
+                              })) %>% 
+  select(-data)
+```
+
+#### 2016 temperature
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2016 & var == "temp") %>% 
+  pull(pre)
+```
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2016 & var == "temp") %>% 
+  pull(post)
+```
+
+#### 2016 day length
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2016 & var == "day_length") %>% 
+  pull(pre)
+```
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2016 & var == "day_length") %>% 
+  pull(post)
+```
+
+#### 2017 temperature
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2017 & var == "temp") %>% 
+  pull(pre)
+```
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2017 & var == "temp") %>% 
+  pull(post)
+```
+
+#### 2017 day length
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2017 & var == "day_length") %>% 
+  pull(pre)
+```
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2017 & var == "day_length") %>% 
+  pull(post)
+```
+
+#### 2018 temperature
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2018 & var == "temp") %>% 
+  pull(pre)
+```
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2018 & var == "temp") %>% 
+  pull(post)
+```
+
+#### 2018 day length
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2018 & var == "day_length") %>% 
+  pull(pre)
+```
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2018 & var == "day_length") %>% 
+  pull(post)
+```
+
+#### 2019 temperature
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2019 & var == "temp") %>% 
+  pull(pre)
+```
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2019 & var == "temp") %>% 
+  pull(post)
+```
+
+#### 2019 day length
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2019 & var == "day_length") %>% 
+  pull(pre)
+```
+
+```{r, cache=TRUE}
+qq %>% 
+  filter(year == 2019 & var == "day_length") %>% 
+  pull(post)
+```
+
+### Inflation factors pre-genomic control
+
+```{r}
+gxe_gwas %>% 
+  select(var, year, p_wald, adj_p) %>% 
+  group_by(var, year) %>% 
+  nest() %>% 
+  mutate(`Pre-GC inflation factor` = purrr::map_dbl(.x = data,
+                                              ~ .x %>% 
+                                                gcif())) %>% 
+  rename(`Variable` = var,
+         Year = year) %>% 
+  select(-data) %>% 
+  arrange(Year)
+```
+
+## Results
+
+```{r, fig.width = 8, fig.height=9}
+gxe_gwas %>% 
+  filter(var == "day_length") %>% 
+  filter(0.1 > adj_p) %>% 
+  hair_manhattan(y_var = neglog10p, 
+                 y_lab = "-log_10(Adj. p-value)",
+                 plot_title = "Day length",
+                 color1 = "#b9aa97",
+                 color2 = "#7e756d",
+                 facet = TRUE,
+                 nfacets = 4,
+                 desc = year)
+```
+
+```{r, fig.width = 8, fig.height=9}
+gxe_gwas %>% 
+  filter(var == "temp") %>% 
+  filter(0.1 > adj_p) %>% 
+  hair_manhattan(y_var = neglog10p, 
+                 y_lab = "-log_10(Adj. p-value)",
+                 plot_title = "Temperature",
+                 color1 = "#b9aa97",
+                 color2 = "#7e756d",
+                 facet = TRUE,
+                 nfacets = 4,
+                 desc = year)
+```
+
+# Step 3. Meta-analysis of year-specific GxE GWAS using Metasoft
+
+* Day length, initial run:
+
+```
+srun java -jar source_functions/Metasoft/Metasoft.jar -pvalue_table source_functions/Metasoft/HanEskinPvalueTable.txt -input data/derived_data/metasoft/day_length/metasoft_in.day_length.txt -output data/derived_data/metasoft/day_length/metasoft_out.day_length.txt -mvalue -mvalue_p_thres 0.01 -log data/derived_data/metasoft/day_length/metasoft.day_length.log
+```
+
+* Day length, second run adjusting RE2 p-values for 
+    + `-lambda_mean 1.401986`
+    + `-lambda_hetero 0.332300`:
+
+```
+srun java -jar source_functions/Metasoft/Metasoft.jar -pvalue_table source_functions/Metasoft/HanEskinPvalueTable.txt -input data/derived_data/metasoft/day_length/metasoft_in.day_length.txt -output data/derived_data/metasoft/day_length/metasoft_out.day_length_adj.txt -mvalue -mvalue_p_thres 0.01 -lambda_mean 1.401986 -lambda_hetero 0.332300 -log data/derived_data/metasoft/day_length/metasoft.day_length_adj.log
+```
+
+* Temperature, initial run:
+
+```
+srun --account animalsci java -jar source_functions/Metasoft/Metasoft.jar -pvalue_table source_functions/Metasoft/HanEskinPvalueTable.txt -input data/derived_data/metasoft/temp/metasoft_in.temp.txt -output data/derived_data/metasoft/temp/metasoft_out.temp.txt -mvalue -mvalue_p_thres 0.01 -log data/derived_data/metasoft/temp/metasoft.temp.log
+```
+
+* Temperature, second run adjusting RE2 p-values for 
+    + `-lambda_mean 1.101779`
+    + `-lambda_hetero 0.470108`:
+
+```
+srun --account animalsci java -jar source_functions/Metasoft/Metasoft.jar -pvalue_table source_functions/Metasoft/HanEskinPvalueTable.txt -input data/derived_data/metasoft/temp/metasoft_in.temp.txt -output data/derived_data/metasoft/temp/metasoft_out.temp_adj.txt -mvalue -mvalue_p_thres 0.01 -lambda_mean 1.101779 -lambda_hetero 0.470108 -log data/derived_data/metasoft/temp/metasoft.temp_adj.log
+```
+
+## Diagnostic 
+
+* Day length
+    + $\lambda$ inflation factor = `r gxe_metasoft %>% filter(var == "day_length") %>% filter(!is.na(pvalue_re2)) %>% gcif(p_col = pvalue_re2)`
+
+```{r}
+ggqq(pvector = gxe_metasoft %>%
+       filter(var == "day_length") %>% 
+       filter(!is.na(pvalue_re2)) %>% 
+       pull(pvalue_re2)) +
+  ggtitle("Metasoft RE2 p-valules (day length)")
+```
+
+* Temperature
+    + $\lambda$ inflation factor = `r gxe_metasoft %>% filter(var == "temp") %>% filter(!is.na(pvalue_re2)) %>% gcif(p_col = pvalue_re2)`
+
+```{r}
+ggqq(pvector = gxe_metasoft %>%
+       filter(var == "temp") %>% 
+       filter(!is.na(pvalue_re2)) %>% 
+       pull(pvalue_re2)) +
+  ggtitle("Metasoft RE2 p-valules (temperature)")
+```
+
+## Results
+
+### How many passing variants?
+
+```{r}
+gxe_metasoft %>% 
+  filter(neglog10q_re2 >= q_fdr1) %>% 
+  group_by(var) %>% 
+  tally(name = "FDR = 1%") %>% 
+  ungroup() %>% 
+  left_join(gxe_metasoft %>% 
+              filter(neglog10q_re2 >= q_fdr5) %>% 
+              group_by(var) %>% 
+              tally(name = "FDR = 5%"))
+```
+
+### Manhattan plots
+
+```{r, fig.width=8, fig.height=3}
+man_dl <-
+  gxe_metasoft %>% 
+  filter(var == "day_length") %>% 
+  hair_manhattan(y_var = neglog10q_re2,
+                 color1 = "#638b66", 
+                 color2 = "#a2ceaa",
+                 y_lab = latex2exp::TeX("$-log_{10}(q-value)$"),
+                 sigline = q_fdr1) +
+  geom_hline(yintercept = q_fdr5,
+             color = "blue")
+```
+
+```{r, fig.width=8, fig.height=3}
+man_t <-
+  gxe_metasoft %>% 
+  filter(var == "temp") %>% 
+  hair_manhattan(y_var = neglog10q_re2,
+                 color1 = "#638b66", 
+                 color2 = "#a2ceaa",
+                 y_lab = latex2exp::TeX("$-log_{10}(q-value)$"),
+                 sigline = q_fdr1) +
+  ylim(c(0, 8)) +
+  geom_hline(yintercept = q_fdr5,
+             color = "blue")
+```
+
+```{r, fig.width=8, fig.height=3}
+man_t
+```
+
+### Panel figure
+
+```{r, fig.width=8, fig.height=6, eval = TRUE}
+
+
+man_t/man_dl + plot_annotation(tag_levels = c("a")) & 
+  theme(plot.tag = element_text(size = 24),
+        plot.margin = margin(t = 0, b = 0, l = 0.75, r = 1, unit = "mm"))
+
+ggsave(filename = here::here("figures/gxe_gwas/gxe_metasoft.panel.png"), height = 6, width = 8) 
+
+```
+
+```{r, fig.width=8, fig.height=6}
+gxe_metasoft %>% 
+  mutate(var = if_else(var == "temp", "Temperature", "Day length")) %>% 
+  filter(0.1 > pvalue_re2) %>% 
+  hair_manhattan(y_var = neglog10q_re2,
+                 facet = TRUE,
+                 nfacets = 2,
+                 desc = var,
+                 color1 = "#638b66", 
+                 color2 = "#a2ceaa",
+                 y_lab = latex2exp::TeX("$-log_{10}(q-value)$"),
+                 sigline = q_fdr1) +
+  ylim(c(0, 8)) +
+  geom_hline(yintercept = q_fdr5,
+             color = "blue") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "transparent",
+                                    colour = NA),
+        panel.border = element_rect(colour = "black",
+                                    fill = "transparent"),
+        plot.background = element_rect(fill = "transparent",
+                                   colour = NA),
+        strip.background = element_rect(fill = "transparent",
+                                   colour = "black"))
+```
+
+
+```{r, fig.width=8, fig.height=6}
+ggsave(filename = here::here("figures/gxe_gwas/gxe_metasoft.panel_transparent.png"), height = 6, width = 8, bg = "transparent") 
+```

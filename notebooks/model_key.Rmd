@@ -1,0 +1,108 @@
+---
+title: "Model key"
+author: "Harly Durbin"
+output: html_document
+---
+
+Organized by goal/motivation
+
+# Latitude
+
+# Temperature, day length
+
+## `fixed5`
+
+* `{year} + {calving_season} + {age_group} + {toxic_fescue} + {mean_day_length}`
+* Only day length, no temperature
+
+## `fixed6`
+
+* `{year} + {calving_season} + {age_group} + {toxic_fescue} + {mean_apparent_high}`
+* Only temperature, no day length
+
+## `fixed3`
+
+* `{year} + {calving_season} + {age_group} + {toxic_fescue} + {mean_day_length} + {mean_apparent_high}`
+* Temperature and day length
+
+## `fixed13`
+
+* `{year} + {calving_season} + {age_group} + {toxic_fescue} + {mean_day_length} + {mean_apparent_high} + {centered_temp_length}`
+* `fixed4`, but center the interaction term
+    
+# Contemporary group vs. environmental variables
+
+## `fixed9`
+
+* `{farm_id + year + calving_season + age_group + score_group + toxic_fescue}`
+* Base model, contemporary group only
+* Model used for basic GWAS
+
+## `fixed14`
+
+* Exact same as `fixed9` model, but use phenotypes for genotyped animals only
+
+## `fixed15`
+
+* Exact same as `fixed14` model, but add correction for PC 1 and PC 2
+* Trying to solve issues potentially caused by population structure
+
+## `fixed10`
+
+* `{farm_id + year + calving_season + age_group + score_group + toxic_fescue} + {mean_apparent_high}`
+* Contemporary group + temp
+
+## `fixed11`
+
+* `{farm_id + year + calving_season + age_group + score_group + toxic_fescue} + {mean_day_length}`
+* Contemporary group + day length
+
+## `fixed12`
+
+* `{farm_id + year + calving_season + age_group + score_group + toxic_fescue} + {mean_day_length} + {mean_apparent_high}`
+* Contemporary group + temp + day length
+
+# Breed-specific evaluations
+
+In breed-specific evaluations, only use genotypes & 3-generation pedigree for breed of interest (rather than full pedigree and all 11,560 genotyped animals)
+
+## `igs1`
+
+* Participating IGS breed associations
+    + RAN, SIM, GEL, SH, CHI
+
+## `hfd1`
+
+* AHA records
+
+## `bg1`
+
+* IBBA records
+
+## `an1`
+
+* AAA records
+
+# Year-specific evaluations
+
+## `2016an`
+
+## `2017an`
+
+## `2018an`
+
+## `2019an`
+
+# Age
+
+## `fixed16`
+
+* `{farm_id + year + calving_season + score_group + toxic_fescue} + {age}`
+* Categorical age + partial contemporary group
+
+# Etc.
+
+## `gxe_gwas`
+
+* `{farm_id + year + calving_season + age_group + toxic_fescue}`
+* Pre-adjust phenotypes for GxE GWAS using CG with `farm_id` but without `score_group`

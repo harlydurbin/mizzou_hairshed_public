@@ -1,0 +1,1363 @@
+---
+title: "Multi-breed 3-generation pedigree"
+author: "Harly Durbin"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+library(readr)
+library(tidyr)
+library(stringr)
+library(dplyr)
+library(readxl)
+library(magrittr)
+library(glue)
+library(purrr)
+library(tidylog)
+
+source(here::here("source_functions/coalesce_join.R"))
+source(here::here("source_functions/iterative_id_search.R"))
+source(here::here("source_functions/three_gen.R"))
+
+```
+
+# Setup 
+
+```{r, message=FALSE,warning=FALSE}
+animal_table <- 
+  read_rds(here::here("data/raw_data/import_join_clean/animal_table.rds")) %>% 
+  mutate(dam_breed_assoc = if_else(is.na(dam_breed_assoc_reg), NA_character_, dam_breed_assoc),
+         sire_breed_assoc = if_else(is.na(sire_breed_assoc_reg), NA_character_, sire_breed_assoc))
+```
+
+```{r, message = FALSE, warning = FALSE}
+cleaned <- 
+  read_rds(here::here("data/derived_data/import_join_clean/cleaned.rds")) %>% 
+  mutate(registration_number = if_else(registration_number == "126247", "1262647", registration_number))
+```
+
+```{r}
+sample_table <- 
+  read_csv(here::here("data/raw_data/import_join_clean/200820_sample_sheet.csv"),
+           trim_ws = TRUE,
+           guess_max = 100000)
+```
+
+# Notes & questions
+
+```{r}
+cleaned %>% 
+  distinct(farm_id, temp_id, breed_code) %>% 
+  group_by(breed_code) %>% 
+  tally(sort = TRUE)
+
+```
+
+> What all needs to be done?
+
+* ~~Brangus~~
+* ~~Red Angus~~
+    + Emailed Ryan Boldt
+* ~~Simmental~~
+    + Emailed Jackie Atkins and Rachel Endecott
+* ~~Charolais~~
+    + Emailed Sally Northcutt
+* ~~Gelbvieh~~ 
+    + Emailed Will Fiske and Taylor Buckley
+* ~~Hereford~~
+    + Emailed Stacy Sanders
+* ~~Shorthorn~~
+    + Email Matt Woolfolk
+    + heather@shorthorn.org
+* All others: pull out Angus sires 
+
+
+# Shorthorn
+
+## List of registration numbers
+
+```{r, eval = FALSE}
+cleaned %>% 
+  left_join(animal_table %>% 
+              select(Lab_ID, breed_assoc_reg, breed_assoc)) %>% 
+  filter(breed_code == "SH" | str_detect(breed_assoc, "Short")) %>% 
+  filter(is.na(breed_assoc) | str_detect(breed_assoc, "Short")) %>% 
+  filter(!is.na(registration_number)) %>% 
+  distinct(registration_number) %>% 
+  write_csv(here::here("data/derived_data/3gen/200415.SH_reg.csv"), col_names = FALSE)
+```
+
+     
+## Three-generation pedigree
+
+```{r, warning= FALSE, message=FALSE}
+sh_var <-
+  tribble(~ reg_var, ~ sire_var, ~ dam_var,
+          "Registration #", "Sire", "Dam",
+          "Sire", "Paternal Grandsire (PGS)", "Paternal Granddam (PGD)",
+          "Dam", "Maternal Grandsire (MGS)", "Maternal Granddam (MGD)",
+          "Paternal Grandsire (PGS)", "PGS's Sire", "PGS's Dam",
+          "Paternal Granddam (PGD)", "PGD's Sire", "PGD's Dam",
+          "Maternal Grandsire (MGS)", "MGS's Sire", "MGS's Dam",
+          "Maternal Granddam (MGD)", "MGD's Sire", "MGD's Dam")
+```
+
+
+```{r, warning= FALSE, message=FALSE}
+sh_ped <-
+  # Pivot wide pedigree longer
+  purrr::pmap(list(x = sh_var$reg_var,
+                   y = sh_var$sire_var,
+                   z =  sh_var$dam_var),
+              .f = function(x, y, z) {
+                read_excel(here::here("data/raw_data/3gen/200417.SH.Mizzou41620.xlsx")) %>%
+                  select(registration_number = x,
+                         sire_reg = y,
+                         dam_reg = z)
+                }) %>% 
+  reduce(bind_rows) %>% 
+  # Animal names are not registration numbers
+  mutate_at(vars(contains("reg")), 
+            ~ if_else(!str_detect(., "[[:digit:]]"), NA_character_, .)) %>% 
+  distinct() %>% 
+  # Update Angus 
+  mutate_all(~ str_replace_all(., "^an", "AAA")) %>%
+  # Update Maine-Anjou
+  mutate_all(~ str_replace_all(., "^ma", "RDP")) %>%
+  # Clean up registration numbers
+  mutate_all(~ str_remove_all(., "[[:punct:]]|x|X")) %>%
+  mutate_all(~ str_to_upper(.)) %>%
+  # Re-append hair shedding ID metadata
+  left_join(cleaned %>%
+              left_join(animal_table %>%
+                          select(Lab_ID, breed_assoc_reg, breed_assoc)) %>%
+              filter(breed_code == "SH" | str_detect(breed_assoc, "Short")) %>%
+              filter(is.na(breed_assoc) | str_detect(breed_assoc, "Short")) %>% 
+              distinct(Lab_ID, registration_number, farm_id, animal_id, temp_id, sex) %>%
+              filter(!is.na(registration_number)))
+```
+
+```{r, warning= FALSE, message=FALSE}
+sh_ped %<>% 
+  mutate(sex = case_when(registration_number %in% sh_ped$sire_reg ~ "M",
+                         registration_number %in% sh_ped$dam_reg ~ "F",
+                         TRUE ~ sex),
+         dummy_iid = glue::glue("BSHUSA{sex}{stringr::str_pad(registration_number, width = 12, side = 'left', pad = '0')}")) %>% 
+  # Search for lab IDs
+  id_search(source_col = registration_number,
+            search_df = animal_table %>% 
+              filter(BC == "SH"),
+            search_col = breed_assoc_reg,
+            key_col = Lab_ID) %>% 
+  id_search(source_col = dummy_iid,
+            search_df = animal_table,
+            search_col = international_id,
+            key_col = Lab_ID) %>% 
+  # 3-generation pedigree format
+  janitor::remove_empty(which = "rows") %>% 
+  mutate_at(vars(contains("reg")), 
+            ~ case_when(is.na(.) ~ "0",
+                        str_detect(., "^AAA") ~ .,
+                        TRUE ~ as.character(glue("BSH{.}")))) %>% 
+  mutate(source = "American Shorthorn Association") %>% 
+  # Remove duplicates
+  distinct() %>% 
+  group_by(registration_number) %>% 
+  arrange(registration_number, desc(sire_reg), desc(dam_reg), desc(Lab_ID)) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  select(-dummy_iid)
+```
+
+## Duplicate check
+
+```{r}
+sh_ped %>% 
+  group_by(registration_number) %>% 
+  filter(n() > 1) %>% 
+  arrange(registration_number, desc(sire_reg), desc(dam_reg), desc(Lab_ID))
+```
+  
+# Gelbvieh 
+
+## List of registration numbers
+
+```{r, eval = FALSE}
+cleaned %>% 
+  left_join(animal_table %>% 
+              select(Lab_ID, breed_assoc_reg, breed_assoc)) %>% 
+  filter(breed_code == "GEL" | str_detect(breed_assoc, "Gelbvieh")) %>% 
+  filter(!farm_id %in% c("SAV", "BAT")) %>% 
+  filter(is.na(breed_assoc) | str_detect(breed_assoc, "American Gelbvieh Association")) %>% 
+  mutate(registration_number = str_remove_all(registration_number, "AMGV"), 
+         registration_number = if_else(registration_number == "126247", "1262647", registration_number)) %>% 
+  filter(!is.na(registration_number)) %>% 
+  filter(!str_detect(registration_number, "^6")) %>% 
+  distinct(registration_number) %>% 
+  write_csv(here::here("data/derived_data/3gen/200413.GEL_reg.csv"), col_names = FALSE)
+```
+
+## Three-generation pedigree sent by AGA
+
+```{r, message=FALSE, warning=FALSE}
+gel_var <-
+  tribble(~ reg_var, ~ sire_var, ~ dam_var,
+          "Registration Number", "Sire Reg No", "Dam Reg No", # animal
+          "Sire Reg No", "Sire's Sire Reg No", "Sire's Dam Reg No", # sire
+          "Dam Reg No", "Dam's Sire Reg No", "Dam's Dam Reg No", # dam
+          "Sire's Sire Reg No", "Sire's Sire Sire Reg No", "Sire's Sire Dam Reg No", # pgs
+          "Sire's Dam Reg No", "Sire's Dam Sire Reg No", "Sire's Dam Dam Reg No", # pgd
+          "Dam's Sire Reg No", "Dam's Sire Sire Reg No", "Dam's Sire Dam Reg No", # mgs
+          "Dam's Dam Reg No", "Dam's Dam Sire Reg No", "Dam's Dam Dam Reg No", # mgd
+          )
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+gel_ped <-
+  # Pivot wide pedigree to long
+  purrr::pmap(list(x = gel_var$reg_var,
+                   y = gel_var$sire_var,
+                   z =  gel_var$dam_var),
+              .f = function(x, y, z) {
+                read_excel(here::here("data/raw_data/200413.GEL.DurbinHarly_HairShedPed_04132020.xls")) %>%
+                  select(registration_number = x,
+                         sire_reg = y,
+                         dam_reg = z)
+                }) %>%
+  reduce(bind_rows) %>%
+  # Re-append hair shedding ID metadata
+  left_join(cleaned %>%
+              left_join(animal_table %>%
+                          select(Lab_ID, breed_assoc_reg, breed_assoc)) %>%
+              filter(breed_code == "GEL" | str_detect(breed_assoc, "Gelbvieh")) %>%
+              filter(!farm_id %in% c("SAV", "BAT")) %>%
+              filter(is.na(breed_assoc) | str_detect(breed_assoc, "American Gelbvieh Association")) %>%
+              mutate(registration_number = if_else(!str_detect(registration_number, "^AMGV"),
+                                                   glue::glue("AMGV{registration_number}"),
+                                                   registration_number)) %>%
+              filter(!is.na(registration_number)) %>%
+              filter(!str_detect(registration_number, "^6")) %>%
+              distinct(Lab_ID, farm_id, animal_id, temp_id, registration_number, sex)) %>%
+  # Add birth date info
+  left_join(read_excel(here::here("data/raw_data/3gen/200413.GEL.DurbinHarly_HairShedPed_04132020.xls")) %>%
+              select(registration_number = `Registration Number`, dob = Birthdate) %>%
+              mutate(dob = lubridate::mdy(dob))) %>%
+  janitor::remove_empty(which = "rows") %>%
+  distinct() 
+```
+
+```{r, message=FALSE, warning=FALSE}
+gel_ped %<>%
+  mutate(sex = case_when(registration_number %in% gel_ped$sire_reg ~ "M",
+                         registration_number %in% gel_ped$dam_reg ~ "F",
+                         TRUE ~ sex),
+         dummy_iid = glue::glue("GVHUSA{sex}{stringr::str_pad(str_remove(registration_number, 'AMGV'), width = 12, side = 'left', pad = '0')}")) %>%
+  # Give Angus reg priority
+  mutate_at(vars(contains("reg")), ~ str_replace(., "^AMAN", "AAA")) %>%
+  # Give Simmental reg priority
+  mutate_at(vars(contains("reg")), ~ str_replace(., "^AMSM", "SIM")) %>%
+  # Give Red Angus reg priority
+  mutate_at(vars(contains("reg")), ~ str_replace(., "^AMAR", "RAN")) %>%
+  # Braunvieh
+  mutate_at(vars(contains("reg")), ~ str_replace(., "^AMBU", "BSW")) %>%
+  # Search for lab IDs
+  id_search(source_col = registration_number,
+            search_df = animal_table %>%
+              filter(BC == "GEL"),
+            search_col = breed_assoc_reg,
+            key_col = Lab_ID) %>%
+  id_search(source_col = registration_number,
+            search_df = animal_table %>%
+              filter(BC == "GEL"),
+            search_col = Reg,
+            key_col = Lab_ID) %>%
+  id_search(source_col = dummy_iid,
+            search_df = animal_table,
+            search_col = international_id,
+            key_col = Lab_ID) %>%
+  # Remove duplicate Lab_IDs, I hate everything
+  group_by(registration_number) %>%
+  arrange(desc(Lab_ID)) %>%
+  slice(1) %>%
+  ungroup() %>%
+  # GVH prefix for animals not registered elsewhere
+  mutate_at(vars(contains("reg")), 
+            ~ case_when(is.na(.) ~ "0",
+                        str_detect(., "^AAA|^SIM|^RAN|^BSW") ~ .,
+                        str_detect(., "^CDGV|^AMXX") ~ as.character(glue("GVH{.}")),
+                        TRUE ~ str_replace(., "AMGV", "GVH"))) %>%
+  distinct() %>%
+  mutate(source = "American Gelbvieh Association") %>%
+  select(-dummy_iid)
+```
+
+```{r}
+gel_ped %>% 
+  mutate(code = str_extract(registration_number, "^[[:alpha:]]+")) %>% 
+  distinct(code)
+```
+
+## Duplicate check
+
+```{r}
+gel_ped %>% 
+  group_by(registration_number) %>% 
+  filter(n() > 1) %>% 
+  left_join(animal_table) %>% 
+  select(Lab_ID, duplicate)
+```
+
+# Charolais
+
+## List of registration numbers
+
+```{r, eval=FALSE}
+cleaned %>%
+  left_join(animal_table %>% 
+              select(Lab_ID, breed_assoc)) %>% 
+  filter(breed_code == "CHA" | breed_assoc == "American International Charolais Association")  %>% 
+  filter(!farm_id %in% c("BAT", "SAV", "HDF")) %>% 
+  distinct(farm_id, breed_code, registration_number, breed_assoc) %>% 
+  filter(!is.na(registration_number)) %>% 
+  filter(!str_detect(registration_number, "^6")) %>% 
+  select(registration_number) %>% 
+  write_csv(here::here("data/derived_data/3gen/200413.CHA_reg.csv"), col_names = FALSE)
+```
+
+## Three-generation pedigree sent by AICA
+
+```{r, warning=FALSE, message=FALSE}
+cha_ped <-
+  # Import raw data
+  read_table2(here::here("data/raw_data/3gen/200416.CHA.AICA_MUhairshed_pedigree_04162020.txt"),
+              skip = 1,
+              col_names = c("registration_number", "sire_reg", "dam_reg", "by"))
+```
+
+```{r, warning=FALSE, message=FALSE}
+cha_ped %<>% 
+  mutate(sex = case_when(registration_number %in% cha_ped$sire_reg ~ "M",
+                         stringr::str_detect(registration_number, "^M") ~ "M",
+                         stringr::str_detect(registration_number, "^EM") ~ "M",
+                         registration_number %in% cha_ped$dam_reg ~ "F",
+                         stringr::str_detect(registration_number, "^F") ~ "F",
+                         stringr::str_detect(registration_number, "^EF") ~ "F")) %>%
+  select(-by) %>%
+  # Re-append hair shedding ID metadata
+  left_join(cleaned %>%
+              left_join(animal_table %>%
+                          select(Lab_ID, breed_assoc)) %>%
+              filter(breed_code == "CHA" | breed_assoc == "American International Charolais Association") %>%
+              filter(!farm_id %in% c("BAT", "SAV", "HDF")) %>%
+              filter(!is.na(registration_number)) %>%
+              filter(!str_detect(registration_number, "^6")) %>%
+              distinct(registration_number, farm_id, animal_id, temp_id, Lab_ID)) %>% 
+  mutate(dummy_iid = glue::glue("CHAUSA{sex}{stringr::str_pad(registration_number, width = 12, side = 'left', pad = '0')}")) %>% 
+  # Lab_ID search
+  id_search(source_col = registration_number,
+            search_df = animal_table %>% 
+              filter(BC == "CHA"),
+            search_col = breed_assoc_reg,
+            key_col = Lab_ID) %>% 
+  id_search(source_col = dummy_iid,
+            search_df = animal_table,
+            search_col = international_id,
+            key_col = Lab_ID) %>% 
+  arrange(Lab_ID) %>% 
+  mutate_at(vars(contains("reg")), ~ if_else(is.na(.), "0", as.character(glue("CHA{.}")))) %>% 
+  mutate(source = "American International Charolais Association") %>% 
+  # Remove duplicates
+  group_by(registration_number) %>% 
+  arrange(desc(Lab_ID)) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  select(-dummy_iid)
+```
+
+## Duplicate check
+
+```{r}
+cha_ped %>% 
+  group_by(registration_number) %>% 
+  filter(n() > 1) %>% 
+  arrange(registration_number) %>% 
+  left_join(animal_table %>% 
+              select(Lab_ID, duplicate))
+
+```
+
+# Hereford
+
+## List of registration numbers
+
+```{r, eval=FALSE}
+cleaned %>%
+  left_join(animal_table %>% 
+              select(Lab_ID, breed_assoc)) %>% 
+  filter(breed_code == "HFD" | str_detect(breed_assoc, "Hereford"))  %>% 
+  filter(!farm_id %in% c("BAT", "SAV")) %>% 
+  distinct(farm_id, breed_code, registration_number, breed_assoc) %>% 
+  filter(!is.na(registration_number)) %>% 
+  select(registration_number) %>% 
+  write_csv(here::here("data/derived_data/3gen/200413.HFD_reg.csv"),
+            col_names = FALSE)
+```
+
+## Three-generation pedigree sent by AHA
+
+```{r, warning=FALSE, message=FALSE}
+hfd_ped <-
+  # Import raw pedigree
+  read_csv(here::here("data/raw_data/3gen/200415.HFD.MU Shedding project pedigree 041520.CSV"),
+           col_types = cols(.default = col_character())) %>%
+  select(registration_number = anim_ident,
+         sire_reg = sid,
+         dam_reg = did,
+         sex, 
+         dob = calved) %>%
+  mutate(dob = lubridate::mdy(dob),
+         sex = case_when(sex == "B" ~ "M",
+                         sex == "C" ~ "F",
+                         TRUE ~ sex),
+         source = "American Hereford Association") %>% 
+  # Remove polled code
+  mutate_at(vars(contains("reg")), ~ str_remove(., "^P")) %>% 
+  # Re-append hair shedding ID metadata
+  left_join(cleaned %>%
+              left_join(animal_table %>%
+                          select(Lab_ID, breed_assoc)) %>%
+              filter(breed_code == "HFD" | str_detect(breed_assoc, "Hereford")) %>%
+              filter(!farm_id %in% c("BAT", "SAV")) %>%
+              distinct(Lab_ID, registration_number, farm_id, animal_id, temp_id) %>%
+              filter(!is.na(registration_number))) %>% 
+  mutate(dummy_iid = glue::glue("HERUSA{sex}{stringr::str_pad(registration_number, width = 12, side = 'left', pad = '0')}")) %>% 
+  # Lab_ID search
+  id_search(source_col = registration_number,
+            search_df = animal_table %>% 
+              filter(BC == "HFD"),
+            search_col = breed_assoc_reg,
+            key_col = Lab_ID) %>% 
+  id_search(source_col = dummy_iid,
+            search_df = animal_table,
+            search_col = international_id,
+            key_col = Lab_ID) %>% 
+  mutate_at(vars(contains("reg")), 
+            ~ if_else(is.na(.),
+                      "0",
+                      as.character(glue("HER{.}")))) %>% 
+  # Remove duplicates
+  group_by(registration_number) %>% 
+  arrange(desc(Lab_ID)) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  select(-dummy_iid)
+```
+
+## Duplicate check
+
+```{r}
+hfd_ped %>% 
+  group_by(registration_number) %>% 
+  filter(n() > 1) %>% 
+  arrange(registration_number) %>% 
+  left_join(animal_table %>% 
+              select(Lab_ID, duplicate))
+
+```
+
+# Brangus
+
+```{r}
+gather_brangus <-
+  function(file_path) {
+    
+    wide <-
+      if (str_detect(file_path, "xls|xlsx")) {
+        read_excel(file_path, col_types = "text")
+      } else if (str_detect(file_path, "csv")) {
+        read_csv(file_path, col_types = cols(.default = "c"))
+      }
+    
+    bg_var <-
+      tribble(~ reg_var, ~ sire_var, ~ dam_var,
+              "Reg No", "Sire Reg No", "Dam Reg No", # animal
+              "Sire Reg No", "Paternal Grandsire Reg No", "Paternal Granddam Reg No", # sire
+              "Dam Reg No", "Maternal Grandsire Reg No", "Maternal Granddam Reg No", # dam
+              "Paternal Grandsire Reg No", "Paternal Great Paternal Grandsire Reg No", "Paternal Great Paternal Granddam Reg No", # pgs
+              "Paternal Granddam Reg No", "Paternal Great Maternal Grandsire Reg No", "Paternal Great Maternal Granddam Reg No", # pgd
+              "Maternal Grandsire Reg No", "Maternal Great Paternal Grandsire Reg No", "Maternal Great Paternal Granddam Reg No", # mgs
+              "Maternal Granddam Reg No", "Maternal Great Maternal Grandsire Reg No", "Maternal Great Maternal Granddam Reg No" # mgd
+              )
+    
+    long <-
+      purrr::pmap(list(x = bg_var$reg_var,
+                       y = bg_var$sire_var,
+                       z =  bg_var$dam_var),
+        .f = function(x, y, z) {
+          wide %>%
+            select(registration_number = x,
+                   sire_reg = y,
+                   dam_reg = z)
+          }) %>%
+      reduce(bind_rows) %>%
+      left_join(wide %>%
+                  select(registration_number = `Reg No`,
+                         dob = `Birth Date`,
+                         sex = Sex)) %>%
+      mutate(source = "International Brangus Breeders Association",
+             dob = case_when(as.integer(dob) > 1000 ~ janitor::excel_numeric_to_date(as.numeric(dob)),
+                             str_detect(dob, "/") ~ lubridate::mdy(dob),
+                             TRUE ~ lubridate::as_date(dob)),
+             sex = case_when(sex == "B" ~ "M",
+                             sex == "C" ~ "F",
+                             TRUE ~ sex)) %>%
+      mutate_at(vars(contains("reg")),
+                ~ str_replace(., "^EA", "AAA")) %>%
+      left_join(cleaned %>%
+                  filter(breed_code == "BG") %>% 
+                  select(Lab_ID, farm_id, animal_id, temp_id, registration_number))
+    
+    return(long)
+    
+  }
+```
+
+## Gather pedigree from animal detail files sent by Macee
+
+```{r, message=FALSE, warning=FALSE}
+bg_ped <-
+  # Import raw pedigree
+  list.files("~/Box Sync/HairShedding/ReportedData/IBBA",
+             full.names = TRUE,
+             pattern = "details") %>% 
+  purrr::map(~ gather_brangus(file_path = .x)) %>% 
+  reduce(bind_rows) %>% 
+  janitor::remove_empty(which = "rows") %>% 
+  group_by(registration_number) %>% 
+  fill(c("Lab_ID", "farm_id", "animal_id", "temp_id", "dob", "sex", "sire_reg", "dam_reg"),
+       .direction = "downup") %>% 
+  ungroup() %>% 
+  distinct() %>% 
+  mutate(dummy_iid = glue::glue("BGRUSA{sex}{stringr::str_pad(registration_number, width = 12, side = 'left', pad = '0')}")) %>% 
+  # Lab_ID search
+  id_search(source_col = registration_number,
+            search_df = animal_table %>% 
+              filter(BC == "BG"),
+            search_col = breed_assoc_reg,
+            key_col = Lab_ID) %>%  
+  id_search(source_col = dummy_iid,
+            search_df = animal_table,
+            search_col = international_id,
+            key_col = Lab_ID) %>%  
+  id_search(source_col = registration_number,
+            search_df = animal_table %>% 
+              filter(BC == "BG"),
+            search_col = Reg,
+            key_col = Lab_ID) %>%   
+  mutate_at(vars(contains("reg")), 
+            ~ case_when(str_detect(., "^AAA") ~ .,
+                        is.na(.) ~ "0", 
+                        TRUE ~ as.character(glue("BGR{.}")))) %>% 
+  filter(registration_number != "0") %>%
+  group_by(registration_number) %>%
+  arrange(registration_number, sire_reg, dam_reg, desc(Lab_ID)) %>%
+  slice(1) %>%
+  ungroup() %>% 
+  select(-dummy_iid)
+```
+
+* Ask Macee for pedigree of those still missing
+
+```{r, eval=FALSE}
+
+cleaned %>% 
+  filter(breed_code == "BG") %>% 
+  distinct(Lab_ID, farm_id, animal_id, temp_id, registration_number) %>% 
+  anti_join(bg_ped %>% 
+              mutate(registration_number = str_remove(registration_number, "BGR"))) %>% 
+  distinct(registration_number) %>% 
+  filter(!is.na(registration_number)) %>% 
+  write_csv(here::here("data/derived_data/3gen/200414.BGR_reg.csv"), col_names = FALSE)
+```
+
+## Duplicate check
+
+```{r}
+bg_ped %>% 
+  group_by(registration_number) %>% 
+  filter(n() > 1) %>% 
+  arrange(registration_number) %>% 
+  left_join(animal_table %>% 
+              select(Lab_ID, duplicate)) %>% 
+  arrange(registration_number, sire_reg, dam_reg, desc(Lab_ID))
+```
+
+# Simmental
+
+## List of registration numbers to request three-generation pedigree
+
+```{r, eval = FALSE}
+cleaned %>% 
+  left_join(animal_table %>% 
+              select(Lab_ID, breed_assoc_reg, breed_assoc)) %>% 
+  filter(breed_code == "SIM" | str_detect(breed_assoc, "Simmental")) %>% 
+  filter(!farm_id %in% c("SAV", "BAT")) %>% 
+  filter(is.na(breed_assoc) | str_detect(breed_assoc, "American Simmental Association")) %>% 
+  filter(!is.na(registration_number)) %>% 
+  distinct(registration_number) %>% 
+  filter(!str_detect(registration_number, "^6")) %>% 
+  write_csv(here::here("data/derived_data/3gen/200409.SIM_reg.csv"), col_names = FALSE)
+```
+
+## Three-generation pedigree sent by ASA
+
+* Append SIM code later when replacing with Angus numbers
+
+```{r, message=FALSE, warning=FALSE}
+sim_ped <-
+  # Import raw pedigree
+  read_csv(here::here("data/raw_data/3gen/200409.SIM.three-gen-ped.csv"),
+           col_types = cols(.default = col_character()),
+           skip = 1,
+           col_names = c("registration_number", "sire_reg", "dam_reg")) %>% 
+  # Re-append hair shedding ID metadata
+  left_join(cleaned %>% 
+              select(Lab_ID, registration_number, farm_id, animal_id, temp_id) %>% 
+              distinct())
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+sim_ped %<>%
+  mutate(sex = case_when(registration_number %in% sim_ped$sire_reg ~ "M",
+                         registration_number %in% sim_ped$dam_reg ~ "F"),
+         dummy_iid = glue::glue("SIMUSA{sex}{stringr::str_pad(registration_number, width = 12, side = 'left', pad = '0')}")) %>% 
+  # Lab_ID search
+  id_search(source_col = registration_number,
+            search_df = animal_table %>% 
+              filter(BC == "SIM"),
+            search_col = breed_assoc_reg,
+            key_col = Lab_ID) %>%  
+  id_search(source_col = dummy_iid,
+            search_df = animal_table,
+            search_col = international_id,
+            key_col = Lab_ID) %>%  
+  id_search(source_col = registration_number,
+            search_df = animal_table %>%
+              filter(BC == "SIM"),
+            search_col = Reg,
+            key_col = Lab_ID) %>%
+  select(Lab_ID, farm_id, animal_id, temp_id, everything()) %>% 
+  # Remove duplicates
+  group_by(registration_number) %>% 
+  arrange(registration_number, sire_reg, dam_reg, desc(Lab_ID)) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  select(-dummy_iid)
+```
+
+## Duplicate check
+
+```{r}
+sim_ped %>% 
+  group_by(registration_number) %>% 
+  filter(n() > 1) %>% 
+  arrange(registration_number) %>% 
+  left_join(animal_table %>% 
+              select(Lab_ID, duplicate)) %>% 
+  arrange(registration_number, sire_reg, dam_reg, desc(Lab_ID))
+```
+
+# Red Angus
+
+## List of registration numbers
+
+```{r, eval = FALSE}
+cleaned %>% 
+  left_join(animal_table %>% 
+              select(Lab_ID, breed_assoc_reg, breed_assoc)) %>% 
+  filter(breed_code == "ANR" | str_detect(breed_assoc_reg, "Red Angus")) %>% 
+  filter(is.na(breed_assoc) | breed_assoc == "Red Angus Association of America") %>% 
+  distinct(registration_number) %>% 
+  write_csv(here::here("data/derived_data/3gen/200409.RAN_reg.csv"), col_names = FALSE)
+```
+
+## Three-generation pedigree sent by RAAA
+
+```{r, message=FALSE, warning=FALSE}
+ran_var <-
+  tribble(~ reg_var, ~sire_var, ~ dam_var,
+          "reg#", "sire_reg#", "dam_reg#", # animal
+          "sire_reg#", "ss_reg", "sd_reg", # sire
+          "dam_reg#", "ds_reg", "dd_reg", # dam
+          "ss_reg", "sss_reg", "ssd_reg", # pgs
+          "sd_reg", "sds_reg", "sdd_reg", # pgd
+          "ds_reg", "dss_reg", "dsd_reg", # mgs
+          "dd_reg", "dds_reg", "ddd_reg" #mgd
+          )
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+ran_ped <-
+  # Import raw pedigree
+  purrr::pmap(list(x = ran_var$reg_var,
+                   y = ran_var$sire_var,
+                   z =  ran_var$dam_var),
+              .f = function(x, y, z) {
+                read_excel(here::here("data/raw_data/3gen/200413.RAN.Hair Shedding Pedigree 4.13.20.xlsx"),
+                           col_types = "text") %>%
+                  select(registration_number = x,
+                         sire_reg = y,
+                         dam_reg = z)
+    }) %>%
+  reduce(bind_rows) %>% 
+  filter(!is.na(registration_number)) %>%
+  # only sent dam dob for some reason
+  left_join(read_excel(here::here("data/raw_data/3gen/200413.RAN.Hair Shedding Pedigree 4.13.20.xlsx"),
+                       col_types = "text") %>%
+              select(registration_number = `dam_reg#`,
+                     dob = dam_bdate)) %>%
+  # add sex
+  left_join(read_excel(here::here("data/raw_data/3gen/200413.RAN.Hair Shedding Pedigree 4.13.20.xlsx"),
+                       col_types = "text") %>%
+      select(registration_number = `reg#`,
+             sex = sex_a)) %>%
+  # Re-append hair shedding ID metadata
+  left_join(cleaned %>%
+              left_join(animal_table %>%
+                          select(Lab_ID, breed_assoc_reg, breed_assoc)) %>%
+              filter(breed_code == "ANR" | str_detect(breed_assoc_reg, "Red Angus")) %>%
+              filter(is.na(breed_assoc) |  breed_assoc == "Red Angus Association of America") %>%
+              distinct(Lab_ID, registration_number, farm_id, animal_id, temp_id)) %>%
+  distinct() %>%
+  janitor::remove_empty(which = c("rows")) %>%
+  group_by(registration_number) %>%
+  fill(c("Lab_ID", "farm_id", "temp_id", "animal_id", "dob" ,"sex", "sire_reg", "dam_reg"), .direction = "downup") %>%
+  ungroup() %>%
+  distinct() %>%
+  mutate(dob = lubridate::mdy(dob),
+         sex = case_when(sex == "B" ~ "M",
+                         sex == "C" ~ "F",
+                         TRUE ~ sex),
+         source = "Red Angus Association of America",
+         dummy_iid = glue::glue("RANUSA{sex}{stringr::str_pad(registration_number, width = 12, side = 'left', pad = '0')}")) %>% 
+  # Lab_ID search
+  id_search(source_col = registration_number,
+            search_df = animal_table %>% 
+              filter(BC == "ANR"),
+            search_col = breed_assoc_reg,
+            key_col = Lab_ID) %>%  
+  id_search(source_col = registration_number,
+            search_df = animal_table %>% 
+              filter(BC == "ANR"),
+            search_col = Reg,
+            key_col = Lab_ID) %>%
+  id_search(source_col = dummy_iid,
+            search_df = animal_table,
+            search_col = international_id,
+            key_col = Lab_ID) %>% 
+  mutate_at(vars(contains("reg")),
+            ~ if_else(is.na(.),
+                      "0",
+                      as.character(glue("RAN{.}")))) %>% 
+  select(-dummy_iid)
+```
+
+* Not enough known Angus pedigree connections to be worth messing with
+
+```{r}
+ran_ped %>%
+  filter(!is.na(Lab_ID)) %>%
+  left_join(animal_table %>%
+              select(Lab_ID, sire_breed_assoc, sire_breed_assoc_reg)) %>%
+  # Known Angus sires
+  filter(sire_breed_assoc == "American Angus Association") %>%
+  select(ran_reg = sire_reg,
+         an_reg = sire_breed_assoc_reg) %>%
+  bind_rows(ran_ped %>%
+              filter(!is.na(Lab_ID)) %>%
+              left_join(animal_table %>%
+                          select(Lab_ID, dam_breed_assoc, dam_breed_assoc_reg)) %>%
+      # Known Angus dams
+      filter(dam_breed_assoc == "American Angus Association") %>%
+      select(ran_reg = dam_reg,
+             an_reg = dam_breed_assoc_reg))
+```
+
+## Duplicate check
+
+```{r}
+ran_ped %>% 
+  group_by(registration_number) %>% 
+  filter(n() > 1) %>% 
+  arrange(registration_number) %>% 
+  left_join(animal_table %>% 
+              select(Lab_ID, duplicate)) %>% 
+  arrange(registration_number, sire_reg, dam_reg, desc(Lab_ID))
+
+```
+
+# Angus + Angus in other breed associations
+
+## List of registration numbers in other breeds
+
+```{r, message=FALSE, warning=FALSE}
+an_reg <-
+  # Sires based on animal table
+  cleaned %>%
+  distinct(farm_id, temp_id, Lab_ID, breed_code) %>%
+  filter(!is.na(Lab_ID)) %>%
+  left_join(animal_table %>%
+              select(Lab_ID, breed_assoc, sire_breed_assoc, sire_breed_assoc_reg)) %>%
+  filter(sire_breed_assoc == "American Angus Association") %>%
+  filter(breed_assoc != "American Angus Association") %>%
+  select(an_reg = sire_breed_assoc_reg) %>%
+  # Dams based on animal table
+  bind_rows(cleaned %>%
+              distinct(farm_id, temp_id, Lab_ID, breed_code) %>%
+              filter(!is.na(Lab_ID)) %>%
+              left_join(animal_table %>%
+                          select(Lab_ID, breed_assoc, dam_breed_assoc, dam_breed_assoc_reg)) %>%
+              filter(dam_breed_assoc == "American Angus Association") %>%
+              filter(breed_assoc != "American Angus Association")  %>%
+              select(an_reg = dam_breed_assoc_reg)) %>%
+  mutate(sim_reg = NA_character_) %>% 
+  distinct()
+```
+
+```{r, message=FALSE, warning=FALSE}
+an_reg %<>%
+# Add in SIM pedigree info
+  coalesce_join(sim_ped %>%
+                  filter(!is.na(Lab_ID)) %>%
+                  left_join(animal_table %>%
+                              select(Lab_ID, sire_breed_assoc, sire_breed_assoc_reg)) %>%
+                  # Known Angus sires
+                  filter(sire_breed_assoc == "American Angus Association") %>%
+                  select(sim_reg = sire_reg,
+                         an_reg = sire_breed_assoc_reg) %>%
+                  bind_rows(sim_ped %>%
+                              filter(!is.na(Lab_ID)) %>%
+                              left_join(animal_table %>%
+                                          select(Lab_ID, dam_breed_assoc, dam_breed_assoc_reg)) %>%
+                              # Known Angus dams
+                              filter(dam_breed_assoc == "American Angus Association") %>%
+                              select(sim_reg = dam_reg,
+                                     an_reg = dam_breed_assoc_reg)) %>% 
+                  distinct(),
+                by = c("an_reg")) %>% 
+  filter(!str_detect(an_reg, "^2")) %>% 
+  mutate(an_reg = glue::glue("AAA{an_reg}"))
+```
+
+```{r, eval=FALSE}
+an_reg %>% 
+   write_csv(here::here("data/derived_data/3gen/200917.AN_reg.csv"), col_names = FALSE)
+```
+
+## Three-generation pedigree
+
+```{r, message=FALSE, warning=FALSE}
+an_ped <-
+  # Import raw pedigree
+  read_csv(here::here("data/derived_data/3gen/200413.AN_ped.csv")) %>% 
+  rename(registration_number = full_reg) %>% 
+  # Re-append hair shedding ID metadata
+  left_join(cleaned %>% 
+              distinct(Lab_ID, farm_id, animal_id, temp_id, sex)) %>% 
+  group_by(registration_number) %>% 
+  fill(c("Lab_ID", "farm_id", "temp_id", "animal_id", "sire_reg", "dam_reg"),
+       .direction = "downup") %>% 
+  ungroup() %>% 
+  distinct()
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+an_ped %<>% 
+  mutate(sex = case_when(registration_number %in% an_ped$sire_reg ~ "M",
+                         registration_number %in% an_ped$dam_reg ~ "F",
+                         TRUE ~ sex),
+         source = "American Angus Association",
+         Reg = str_remove(registration_number, "AAA"),
+         dummy_iid = glue::glue("AANUSA{sex}{stringr::str_pad(Reg, width = 12, side = 'left', pad = '0')}")) %>%
+  # Lab_ID search
+  id_search(source_col = Reg,
+            search_df = animal_table %>%
+              filter(BC == "AN"),
+            search_col = breed_assoc_reg,
+            key_col = Lab_ID) %>%  
+  id_search(source_col = dummy_iid,
+            search_df = animal_table,
+            search_col = international_id,
+            key_col = Lab_ID) %>% 
+  select(-Reg, -dummy_iid) %>% 
+  # Remove duplicates
+  group_by(registration_number) %>% 
+  arrange(registration_number, sire_reg, dam_reg, desc(Lab_ID)) %>% 
+  slice(1) %>% 
+  ungroup()
+```
+
+## Duplicate check
+
+```{r}
+an_ped %>% 
+  group_by(registration_number) %>% 
+  filter(n() > 1) %>% 
+  arrange(registration_number) %>% 
+  left_join(animal_table %>% 
+              select(Lab_ID, duplicate)) %>% 
+  arrange(registration_number, sire_reg, dam_reg, desc(Lab_ID))
+
+```
+
+# Join all pedigrees
+
+## Simmental
+
+* Give Angus registration numbers priority
+
+```{r, message=FALSE, warning=FALSE}
+full_ped <-
+  sim_ped %>%
+  left_join(an_reg %>%
+              filter(!is.na(an_reg)) %>%
+              filter(!is.na(sim_reg)) %>%
+              group_by(an_reg) %>%
+              filter(n() == 1) %>%
+              ungroup(),
+            by = c("sire_reg" = "sim_reg")) %>% 
+  # Change sire registration numbers
+  mutate(sire_reg = if_else(!is.na(an_reg),
+                            an_reg,
+                            sire_reg)) %>% 
+  select(-an_reg) %>% 
+  left_join(an_reg %>%
+              filter(!is.na(an_reg)) %>%
+              filter(!is.na(sim_reg)) %>%
+              group_by(an_reg) %>%
+              filter(n() == 1) %>%
+              ungroup(),
+            by = c("dam_reg" = "sim_reg")) %>% 
+  # Change dam registration numbers
+  mutate(dam_reg = if_else(!is.na(an_reg),
+                           an_reg,
+                           dam_reg),
+         source = "American Simmental Association") %>% 
+  select(-an_reg) %>% 
+  mutate_at(vars(contains("reg")),
+            ~ case_when(is.na(.) ~ "0",
+                        str_detect(., "^AAA") ~ as.character(.),
+                        TRUE ~ as.character(glue("SIM{.}"))))
+              
+```
+
+## Angus, Brangus, Charolais, Gelbvieh, Hereford, Red Angus, Shorthorn
+
+```{r}
+full_ped %<>% 
+  bind_rows(an_ped, bg_ped, cha_ped, gel_ped, hfd_ped, ran_ped, sh_ped) %>% 
+  group_by(registration_number) %>% 
+  fill(c("Lab_ID", "farm_id", "animal_id", "temp_id", "sire_reg","dam_reg", "dob", "sex"), .direction = "downup") %>% 
+  ungroup() %>% 
+  distinct()
+```
+
+# Find what's missing
+
+## Animal
+
+```{r, message=FALSE, warning=FALSE}
+orphaned <-
+  cleaned %>% 
+  distinct(Lab_ID, farm_id, animal_id, temp_id, registration_number) %>% 
+  # Those not found in full_ped yet
+  anti_join(full_ped %>% 
+              distinct(Lab_ID, farm_id, animal_id, temp_id)) %>% 
+  left_join(animal_table %>% 
+              select_at(vars(BC, breed_assoc, breed_assoc_reg,
+                             international_breed_code, contains("sire"), contains("dam"), Lab_ID))) %>% 
+  mutate(sire_reg = case_when(!is.na(sire_breed_assoc_reg) ~ sire_breed_assoc_reg, 
+                              !is.na(Sire_Reg) ~ Sire_Reg),
+         dam_reg = case_when(!is.na(dam_breed_assoc_reg) ~ dam_breed_assoc_reg,
+                             !is.na(Dam_Reg) ~ Dam_Reg)) %>% 
+  select_at(vars(Lab_ID, farm_id, animal_id, temp_id, registration_number, BC, breed_assoc, breed_assoc_reg, international_breed_code, contains("sire"), contains("dam")))
+```
+
+## Parents
+
+```{r, message=FALSE, warning=FALSE}
+orphaned %<>% 
+  # Parent & grandparent info
+  select(Lab_ID = lab_id_sire,
+         registration_number = sire_reg) %>% 
+  bind_rows(orphaned %>% 
+              select(Lab_ID = lab_id_dam,
+                     registration_number = dam_reg)) %>% 
+  distinct() %>% 
+  filter(!is.na(Lab_ID)) %>% 
+  left_join(animal_table %>% 
+              select_at(vars(breed_assoc_reg, BC, breed_assoc, international_breed_code, contains("sire"), contains("dam"), Lab_ID))) %>% 
+  mutate(sire_reg = case_when(!is.na(sire_breed_assoc_reg) ~ sire_breed_assoc_reg, 
+                              !is.na(Sire_Reg) ~ Sire_Reg),
+         dam_reg = case_when(!is.na(dam_breed_assoc_reg) ~ dam_breed_assoc_reg,
+                             !is.na(Dam_Reg) ~ Dam_Reg)) %>% 
+    select_at(vars(Lab_ID, registration_number, BC, breed_assoc, breed_assoc_reg, international_breed_code, contains("sire"), contains("dam"))) %>% 
+  bind_rows(orphaned) %>% 
+  distinct()
+```
+
+## QC
+
+* Change breed codes
+
+```{r}
+animal_table %>% 
+  distinct(breed_assoc, international_breed_code) %>% 
+  filter_all(all_vars(!is.na(.))) %>% 
+  arrange(international_breed_code)
+```
+
+```{r}
+orphaned %<>% 
+  # Remove punctuation and leading X from Shorthorn
+  mutate_at(vars(contains("reg")),
+            ~ str_remove_all(., "[[:punct:]]|x|X")) %>%
+  # Remove "P" from Hereford
+  mutate_at(vars(contains("reg")),
+            ~ if_else(BC == "HFD",
+                      str_remove_all(., "P|p"),
+                      .)) %>%
+  # Breed association codes
+  mutate(sire_assoc = if_else(!is.na(sire_international_breed_code),
+                              sire_international_breed_code,
+                              NA_character_),
+         dam_assoc = if_else(!is.na(dam_international_breed_code),
+                             dam_international_breed_code,
+                             NA_character_),
+         breed_assoc = if_else(!is.na(international_breed_code),
+                               international_breed_code,
+                               NA_character_)) %>% 
+  mutate_at(vars(contains("assoc")),
+            ~ str_replace(., "^AAN", "AAA")) %>%
+  # Imputing
+  mutate(registration_number = case_when(!is.na(breed_assoc) ~ glue("{breed_assoc}{registration_number}"),
+                                         # if sire and dam assoc match, use that
+                                         is.na(breed_assoc) & sire_assoc == dam_assoc & sire_assoc %in% c("SIM", "HER", "RAN", "BSH", "CIA", "RDP", "CHA") ~ glue("{sire_assoc}{registration_number}"),
+                                         is.na(breed_assoc) & sire_assoc == dam_assoc & sire_assoc == "AAA" & str_detect(registration_number, "^1") ~ glue("{sire_assoc}{registration_number}"),
+                                         is.na(breed_assoc) & sire_assoc == "HER" & str_detect(registration_number, "^4") ~ glue("{sire_assoc}{registration_number}"),
+                                         is.na(breed_assoc) & dam_assoc == "HER" & str_detect(registration_number, "^4") ~ glue("{sire_assoc}{registration_number}"),
+                                         TRUE ~ registration_number),
+         dam_reg = case_when(!is.na(dam_assoc) ~ glue("{dam_assoc}{dam_reg}"),
+                             is.na(dam_assoc) & sire_assoc == breed_assoc & breed_assoc %in% c("SIM", "HER", "RAN", "BSH", "CIA", "RDP", "CHA") ~ glue("{breed_assoc}{dam_reg}"),
+                             is.na(dam_assoc) & sire_assoc == breed_assoc & breed_assoc == "AAA" & str_detect(dam_reg, "^1") ~ glue("{sire_assoc}{dam_reg}"),
+                             is.na(dam_assoc) & sire_assoc == "HER" & str_detect(dam_reg, "^4") ~ glue("{sire_assoc}{dam_reg}"),
+                             is.na(dam_assoc) & breed_assoc == "HER" & str_detect(dam_reg, "^4") ~ glue("{breed_assoc}{dam_reg}"),
+                             is.na(dam_assoc) & str_detect(dam_reg, "^1") & breed_assoc == "AAA" ~ glue("AAA{dam_reg}"),
+                             is.na(dam_assoc) & str_detect(dam_reg, "^1") & sire_assoc == "AAA" ~ glue("AAA{dam_reg}"),
+                             is.na(dam_assoc) & str_detect(dam_reg, "^F|^EF") & breed_assoc == "CHA" ~ glue("CHA{dam_reg}"),
+                             is.na(dam_assoc) & str_detect(dam_reg, "^F") & sire_assoc == "CHA" ~ glue("CHA{dam_reg}"),
+                             is.na(dam_assoc) & !is.na(dam_reg) & !str_detect(dam_reg, "^1") & breed_assoc == "RDP" ~ glue("RDP{dam_reg}"),
+                             is.na(dam_assoc) & !is.na(dam_reg) & !str_detect(dam_reg, "^1") & sire_assoc == "RDP" ~ glue("RDP{dam_reg}"),
+                             TRUE ~ dam_reg),
+         sire_reg = case_when(!is.na(sire_assoc) ~ glue("{sire_assoc}{sire_reg}"),
+                              is.na(sire_assoc) & dam_assoc == breed_assoc & breed_assoc %in% c("SIM", "HER", "RAN", "BSH", "CIA", "RDP", "CHA") ~ glue("{breed_assoc}{sire_reg}"),
+                              is.na(sire_assoc) & dam_assoc == breed_assoc & breed_assoc == "AAA" & str_detect(sire_reg, "^1") ~ glue("{dam_assoc}{sire_reg}"),
+                              is.na(sire_assoc) & dam_assoc == "HER" & str_detect(sire_reg, "^4") ~ glue("{dam_assoc}{sire_reg}"),
+                              is.na(sire_assoc) & breed_assoc == "HER" & str_detect(sire_reg, "^4") ~ glue("{breed_assoc}{sire_reg}"),
+                              is.na(sire_assoc) & str_detect(registration_number, "SAV|BAT") & str_detect(sire_reg, "^4") ~ glue("HER{sire_reg}"),
+                              is.na(sire_assoc) & str_detect(registration_number, "SAV|BAT") & str_detect(sire_reg, "^M") ~ glue("CHA{sire_reg}"),
+                              is.na(sire_assoc) & str_detect(registration_number, "SAV|BAT") & str_detect(sire_reg, "^1") ~ glue("AAA{sire_reg}"),
+                              is.na(sire_assoc) & str_detect(sire_reg, "^1") & breed_assoc == "AAA" ~ glue("AAA{sire_reg}"),
+                              is.na(sire_assoc) & str_detect(sire_reg, "^1") & dam_assoc == "AAA" ~ glue("AAA{sire_reg}"),
+                              is.na(sire_assoc) & str_detect(sire_reg, "^M|^EM") & breed_assoc == "CHA" ~ glue("CHA{sire_reg}"),
+                              is.na(sire_assoc) & str_detect(sire_reg, "^M") & dam_assoc == "CHA" ~ glue("CHA{sire_reg}"),
+                              is.na(sire_assoc) & !str_detect(sire_reg, "^1") & breed_assoc == "RDP" ~ glue("RDP{sire_reg}"),
+                              is.na(sire_assoc) & !str_detect(sire_reg, "^1") & dam_assoc == "RDP" ~ glue("RDP{sire_reg}"),
+                              TRUE ~ sire_reg)) %>% 
+  mutate_at(vars(contains("reg")),
+            ~ as.character(.)) %>% 
+  # Filtering
+  mutate(registration_number = case_when(is.na(farm_id) & !str_detect(registration_number, "^BIR|^SIM|^HER|^RAN|^BSH|^CIA|^RDP|^CHA|^AAA|^BGR") ~ NA_character_,
+                                         is.na(registration_number) & !is.na(farm_id) ~ as.character(glue("{farm_id}{animal_id}{temp_id}")),
+                                         TRUE ~ registration_number),
+         sire_reg = if_else(str_detect(sire_reg,
+                                       "^BIR|^SIM|^HER|^RAN|^BSH|^CIA|^RDP|^CHA|^AAA|^BGR"),
+                            sire_reg,
+                            NA_character_),
+         dam_reg = if_else(str_detect(dam_reg,
+                                      "^BIR|^SIM|^HER|^RAN|^BSH|^CIA|^RDP|^CHA|^AAA|^BGR"),
+                           dam_reg,
+                           NA_character_)) %>% 
+  filter(!is.na(registration_number)) %>% 
+  select(Lab_ID, farm_id, animal_id, temp_id, registration_number, sire_reg, dam_reg)
+  
+```
+
+# Combine
+
+```{r}
+full_ped %<>%
+  bind_rows(orphaned) %>%
+  mutate_at(vars(contains("reg")),
+            ~ str_remove_all(., "[[:space:]]|[[:punct:]]")) %>%
+  mutate_at(vars(contains("reg")),
+            ~ replace_na(., "0")) %>%
+  distinct() %>% 
+  group_by(registration_number) %>% 
+  fill(Lab_ID,
+       .direction = "downup") %>% 
+  ungroup() %>% 
+  distinct() %>% 
+  group_by(Lab_ID, registration_number) %>% 
+  fill(farm_id, animal_id, temp_id,
+       .direction = "downup") %>% 
+  mutate(sire_reg = case_when(n_distinct(sire_reg) > 1 ~ "0",
+                              TRUE ~ sire_reg),
+         dam_reg = case_when(n_distinct(dam_reg) > 1 ~ "0",
+                             TRUE ~ dam_reg)) %>% 
+  ungroup() %>% 
+  distinct() %>% 
+  mutate(dam_reg = if_else(dam_reg == registration_number, "0", dam_reg)) %>% 
+  # Shit's fucked with a bunch of Hereford registration numbers, drop them for now
+  group_by(registration_number) %>% 
+  filter(n() == 1) %>% 
+  ungroup() %>% 
+  rename(full_reg = registration_number) %>% 
+  # For duplicates with an AN & SIM reg, give priority to the AN reg
+  group_by(Lab_ID, farm_id, animal_id, temp_id) %>% 
+  mutate(full_reg = case_when(n_distinct(full_reg) > 1 & !is.na(animal_id) & str_detect(full_reg, "SIM") ~ "0",
+                              TRUE ~ full_reg)) %>% 
+  ungroup() %>% 
+  mutate_at(vars(contains("reg")),
+            ~ case_when(str_detect(., "NA$") ~ "0",
+                        . == "CHAFNFANAN" ~ "0",
+                        TRUE ~ .)) %>% 
+  filter(full_reg != "0")
+```
+
+# Any animals without genotypes under assigned Lab ID but with genotypes under duplicate Lab ID? 
+
+```{r}
+full_ped %<>% 
+  # Append duplicate Lab ID
+  left_join(animal_table %>% 
+              select(Lab_ID, duplicate)) %>% 
+  # Append call rate & assay for original Lab ID
+  left_join(sample_table %>% 
+              select(assay_orig = assay, call_rate_orig = call_rate, lab_id),
+            by = c("Lab_ID" = "lab_id")) %>% 
+  # Append call rate & assay for duplicate Lab ID
+  left_join(sample_table %>% 
+              select(assay_dup = assay, call_rate_dup = call_rate, lab_id),
+            by = c("duplicate" = "lab_id"))
+```
+
+```{r}
+full_ped %<>%
+  # Prioritize Lab IDs
+  # If original Lab ID missing sample
+  mutate(Lab_ID_final = case_when(is.na(assay_orig) & !is.na(assay_dup) ~ duplicate,
+                                  # If duplcate sample has F250 or HD
+                                  str_detect(assay_dup, "F250|HD") & call_rate_dup > 0.89 ~ duplicate,
+                                  TRUE ~ Lab_ID)) %>% 
+  group_by(full_reg) %>% 
+  arrange(desc(Lab_ID_final)) %>% 
+  slice(1) %>% 
+  ungroup()
+```
+
+```{r}
+# 9/28/20 deal with Lab ID duplicates
+full_ped %<>%
+  mutate(Lab_ID2 = if_else(is.na(Lab_ID_final),
+                           full_reg,
+                           as.character(Lab_ID_final))) %>% 
+  group_by(Lab_ID2) %>% 
+  # This is stupid but apparently I have duplicates in my pedigree
+  mutate(drop = case_when(n() > 1 & !is.na(farm_id) ~ 1,
+                          n() > 1 & str_detect(full_reg, "BIR") ~ 1,
+                          TRUE ~ 2)) %>% 
+  arrange(drop, full_reg) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  select(-drop, -Lab_ID2)
+```
+
+# Set discordant parents to missing
+
+```{r}
+full_ped %<>% 
+  left_join(read_csv(here::here("data/derived_data/seekparentf90/parentage_conflicts.csv"),
+                     col_types = cols(.default = "c"))) %>% 
+  mutate(sire_reg = if_else(!is.na(wrong_sire),
+                            wrong_sire,
+                            sire_reg),
+         dam_reg = if_else(!is.na(wrong_dam),
+                           wrong_dam,
+                           dam_reg))
+```
+
+# Additional ASA and RAAA pedigree info 10/27/20
+
+## ASA
+
+```{r}
+full_ped %<>% 
+  left_join(read_csv(here::here("data/raw_data/3gen/201027.SIM.6-gen-ped.csv")) %>% 
+              mutate(prefix = str_extract(animal, "^[[:upper:]]{3}"),
+                     prefix = if_else(prefix == "AAN", "AAA", prefix)) %>% 
+              filter(!is.na(prefix)) %>% 
+              filter(str_detect(animal, "USA")) %>% 
+              mutate(full_reg = glue("{prefix}{str_extract(animal, '(?<=0)[1-9][[:digit:]]+$')}"))) %>% 
+  mutate(sex = case_when(is.na(sex) & !is.na(animal) ~ str_extract(animal, "(?<=USA)M|F"),
+                     TRUE ~ sex),
+     sire_reg = case_when(!is.na(sire) & sire_reg == "0" ~ 
+                            glue("{str_extract(sire, '^[[:upper:]]{3}')}{str_extract(sire, '(?<=0)[1-9][[:digit:]]+$')}"),
+                          TRUE ~ sire_reg),
+     sire_reg = str_replace(sire_reg, "^AAN", "AAA"),
+     dam_reg = case_when(!is.na(dam) & dam_reg == "0" ~ 
+                            glue("{str_extract(dam, '^[[:upper:]]{3}')}{str_extract(dam, '(?<=0)[1-9][[:digit:]]+$')}"),
+                          TRUE ~ dam_reg),
+     dam_reg = str_replace(dam_reg, "^AAN", "AAA")) %>% 
+  select(-animal, -sire, -dam, -prefix)
+```
+
+## RAAA
+
+```{r}
+full_ped %<>% 
+  left_join(read_csv(here::here("data/raw_data/3gen/201027.RAN.All_Animals_SireDam.csv")) %>%
+              janitor::remove_empty(which = c("rows", "cols")) %>% 
+              mutate(full_reg = glue("RAN{anm_key}")) %>% 
+              select(full_reg, sire_key, dam_key)) %>% 
+  mutate(sire_reg = case_when(!is.na(sire_key) & sire_reg == "0" ~ glue("RAN{sire_key}"),
+                              TRUE ~ sire_reg),
+         dam_reg = case_when(!is.na(dam_key) & dam_reg == "0" ~ glue("RAN{dam_key}"),
+                              TRUE ~ dam_reg)) %>% 
+  select(-sire_key, -dam_key)
+```
+
+## Misc.
+
+```{r}
+full_ped %<>%
+  mutate_at(vars("full_reg", "sire_reg", "dam_reg"), ~ str_replace_all(., "^GVHAMGV", "GVH"))
+```
+
+```{r}
+full_ped %<>% 
+  left_join(readxl::read_excel(here::here("data/raw_data/3gen/201027.ped_fixes.xlsx")) %>% 
+              select(farm_id, temp_id, full_reg, misc_sire, misc_dam),
+            by = c("farm_id", "temp_id", "full_reg")) %>% 
+  mutate(sire_reg = if_else(!is.na(misc_sire), misc_sire, as.character(sire_reg)),
+         dam_reg = if_else(!is.na(misc_dam), misc_dam, as.character(dam_reg))) %>% 
+  select(-misc_sire, -misc_dam)
+```
+
+```{r}
+full_ped %<>% 
+  mutate_at(vars(contains("reg")), ~ if_else(str_detect(., "(?<=[[:upper:]]{3})NA"), "0", .)) %>%
+  filter(full_reg != "0")
+```
+
+# Final
+
+```{r}
+full_ped %<>% 
+  select(Lab_ID = Lab_ID_final, farm_id, animal_id, temp_id, full_reg, sire_reg, dam_reg, source, dob, sex) %>% 
+  distinct() 
+```
+
+```{r}
+full_ped %<>%
+  filter(full_reg != "RHF107F739")
+```
+
+# Tallies
+
+```{r}
+full_ped %>% 
+  group_by(sire_reg) %>% 
+  tally(sort = TRUE)
+```
+
+```{r}
+full_ped %>% 
+  group_by(dam_reg) %>% 
+  tally(sort = TRUE)
+```
+
+```{r}
+full_ped %>% 
+  mutate(in_project = if_else(!is.na(farm_id), "yes", NA_character_)) %>% 
+  group_by(in_project) %>% 
+  tally(sort = TRUE)
+```
+
+# Duplicate & quality check
+
+```{r}
+full_ped %>% 
+  group_by(full_reg) %>% 
+  filter(n() > 1)
+```
+
+```{r}
+full_ped %>% 
+  filter(!is.na(farm_id)) %>% 
+  filter(!is.na(temp_id)) %>% 
+  group_by(farm_id, temp_id) %>% 
+  filter(n() > 1)
+```
+
+```{r}
+full_ped %>% 
+  group_by(Lab_ID) %>% 
+  filter(n() > 1 & !is.na(Lab_ID)) %>% 
+  arrange(Lab_ID)
+```
+
+```{r}
+bind_rows(full_ped %>% 
+              select(full_reg),
+            full_ped %>% 
+              select(full_reg = sire_reg),
+            full_ped %>% 
+              select(full_reg = dam_reg)) %>% 
+  distinct() %>% 
+  filter(str_detect(full_reg, "GVHAMGV"))
+```
+
+# Export
+
+```{r, eval=TRUE}
+full_ped %>% 
+  write_rds(here::here("data/derived_data/3gen/full_ped.rds"))
+```
+
+```{r}
+read_rds(here::here("data/derived_data/breed_key/breed_key.rds")) %>% 
+  select(full_reg) %>% 
+  left_join(full_ped %>% 
+              select(full_reg, sire_reg, dam_reg)) %>% 
+  three_gen(full_ped = full_ped) %>% 
+  mutate_all(~ replace_na(., "0")) %>% 
+  assertr::verify(!is.na(full_reg)) %>% 
+  assertr::verify(!is.na(sire_reg)) %>% 
+  assertr::verify(!is.na(dam_reg)) %>% 
+  write_delim(here::here("data/derived_data/3gen/blupf90_ped.txt"),
+              delim = " ",
+              col_names = FALSE)
+```
+
+# Commentary

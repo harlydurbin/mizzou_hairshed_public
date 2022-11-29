@@ -1,0 +1,293 @@
+---
+title: "PCA"
+author: "Harly Durbin"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+library(readr)
+library(magrittr)
+library(purrr)
+library(dplyr)
+library(tidyr)
+library(glue)
+library(stringr)
+library(ggplot2)
+library(patchwork)
+
+source(here::here("source_functions/iterative_id_search.R"))
+```
+
+# Notes & questions
+
+# Setup
+
+```{r}
+breed_key <- read_rds(here::here("data/derived_data/breed_key/breed_key.rds"))
+```
+
+```{r}
+cleaned <- read_rds(here::here("data/derived_data/import_join_clean/cleaned.rds"))
+```
+
+```{r}
+sim_breed <-
+  read_csv(here::here("data/raw_data/201005.SIM.breeds.csv")) %>% 
+  select(registration_number = asa_nbr, brd = breed_code, pct) %>% 
+  mutate(cross = if_else(pct == 1, brd, "CROS")) %>% 
+  tidyr::pivot_wider(id_cols = c("registration_number", cross),
+                     names_from = brd,
+                     values_from = pct) %>% 
+  mutate_at(vars(SM:SH), ~ replace_na(., 0)) %>% 
+  janitor::clean_names() %>% 
+  # Don't differentiate between horned and polled Hereford
+  mutate(hfd = hh + hp,
+         # Don't differentiate between purebred and commercial 
+         sim = sm + cs) %>% 
+  select(registration_number, cross, an, ar, br, chi = ca, gv, hfd, sim) %>% 
+  # Don't differentiate between Red Angus and Angus since RAAA doesn't
+  mutate(ar = case_when(ar != 0 & an != 0 & br == 0 & chi == 0 & gv == 0 & hfd == 0 & sim == 0 ~ ar + an,
+                        TRUE ~ ar),
+         ar = if_else(ar > 1, 1, ar),
+         cross = case_when(ar == 1 ~ "AR",
+                           (ar + an) == 1 ~ "AR",
+                           sim == 1 ~ "SIM",
+                           an == 1 ~ "AN",
+                           TRUE ~ cross),
+         brd_source = glue("ASA{row_number()}"),
+         cross = case_when(an >= 0.625 ~ "AN",
+                           sim >= 0.625 ~ "SIM",
+                           ar >= 0.625 ~ "RAN",
+                           gv >= 0.625 ~ "GEL",
+                           hfd >= 0.625 ~ "HFD",
+                           TRUE ~ "Crossbred or other"),
+         registration_number = as.character(glue("SIM{registration_number}")))
+```
+
+```{r}
+
+vec <-
+  read_table2(here::here("data/derived_data/smartpca/smartpca.mizzou_hairshed.evec"),
+              skip = 1,
+              col_names = FALSE) %>%
+  select(-X12) %>%
+  set_names(c("full_reg", map_chr(1:10, ~ str_c("PC", .x)))) %>% 
+  mutate(full_reg = str_extract(full_reg, "(?<=[[:alnum:]]:)[[:alnum:]]+$")) %>% 
+  left_join(breed_key %>% 
+              select(-breed_code)) %>% 
+  left_join(cleaned %>% 
+              distinct(farm_id, animal_id, temp_id, breed_code)) %>% 
+  id_search(source_col = full_reg,
+            search_df = sim_breed,
+            search_col = registration_number,
+            key_col = cross) %>% 
+  mutate(map_breed = case_when(cross == "AN" ~ "Angus",
+                               str_detect(full_reg, "BIR|AAA") ~ "Angus",
+                               an >= 0.625 ~ "Angus",
+                               cross == "HFD" ~ "Hereford",
+                               str_detect(full_reg, "HER") ~ "Hereford",
+                               hfd >= 0.625 ~ "Hereford",
+                               cross == "BGR" ~ "Brangus",
+                               str_detect(full_reg, "BGR") ~ "Brangus",
+                               cross == "RAN" ~ "Red Angus",
+                               cross == "CHA" ~ "Charolais",
+                               str_detect(full_reg, "CHA") ~ "Charolais",
+                               cross == "SH" ~ "Shorthorn",
+                               str_detect(full_reg, "BSH") ~ "Shorthorn",
+                               cross == "RDP" ~ "Maine-Anjou",
+                               str_detect(full_reg, "RDP") ~ "Maine-Anjou",
+                               cross == "GEL" ~ "Gelbvieh",
+                               gv >= 0.625 ~ "Gelbvieh", 
+                               str_detect(full_reg, "^GVH") ~ "Gelbvieh",
+                               source == "American Gelbvieh Association" ~ "Gelbvieh",
+                               cross == "RAN" ~ "Red Angus",
+                               ar >= 0.625 ~ "Red Angus",
+                               str_detect(full_reg, "^RAN") ~ "Red Angus",
+                               source == "Red Angus Association of America" ~ "Red Angus",
+                               cross == "SIM" ~ "Simmental",
+                               sim >= 0.625 ~ "Simmental",
+                               TRUE ~ "Crossbred or other"),
+         map_color = case_when(map_breed == "Crossbred or other" ~ "#a2ceaa",
+                               map_breed == "Angus" ~ "#4f6980",
+                               map_breed == "Hereford" ~ "#f47942",
+                               map_breed == "Red Angus" ~ "#fbb04e",
+                               map_breed == "Simmental" ~ "#638b66",
+                               map_breed == "Brangus" ~ "#bfbb60",
+                               map_breed == "Gelbvieh"~ "#d7ce9f",
+                               map_breed == "Charolais"~ "#849db1",
+                               map_breed == "Shorthorn"~ "#b9aa97",
+                               map_breed == "Maine-Anjou"~ "#7e756d")) 
+```
+
+```{r}
+  val <-
+    read_lines(here::here("data/derived_data/smartpca/smartpca.mizzou_hairshed.evec"),
+               n_max = 1) %>%
+      str_remove("#eigvals:") %>%
+      str_squish() %>%
+      str_split(pattern = "[[:space:]]") %>%
+      flatten_chr() %>%
+      map_dbl( ~ as.numeric(.x))
+```
+
+# Sanity check
+
+```{r}
+vec %>% 
+  group_by(map_breed) %>% 
+  tally()
+```
+
+# Plot PCs
+
+```{r, fig.width = 8, fig.height=5}
+pc1_pc2 <-
+  vec %>% 
+  arrange(map_breed) %>% 
+  mutate(map_breed = forcats::fct_inorder(map_breed),
+         map_breed = forcats::fct_relevel(map_breed, "Crossbred or other", after = Inf)) %>% 
+  ggplot(aes(x = PC1,
+             y = PC2)) +
+  geom_point(aes(color = map_breed),
+             alpha = 0.5) +
+  scale_color_manual(values = c("Crossbred or other" = "#a2ceaa",
+                                "Angus" = "#4f6980",
+                                "Hereford" = "#f47942",
+                                "Red Angus" = "#fbb04e",
+                                "Simmental" = "#638b66",
+                                "Brangus" = "#bfbb60",
+                                "Gelbvieh"= "#d7ce9f",
+                                "Charolais"= "#849db1",
+                                "Shorthorn"= "#b9aa97",
+                                "Maine-Anjou"= "#7e756d")) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_classic() +
+  theme(axis.title = element_text(size = 18),
+        axis.title.y = element_text(margin = margin(t = 0,
+                                                    r = 13,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.title.x = element_text(margin = margin(t = 13,
+                                                    r = 0,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.text = element_text(size = 14),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 14)) +
+  labs(x = str_c("PC 1: ", scales::percent(val[1] / sum(val))),
+       y = str_c("PC 2: ", scales::percent(val[2] / sum(val))),
+       color = str_wrap("Reported or inferred breed",
+                        width = 15))
+```
+
+```{r, fig.width = 8, fig.height=5}
+ggsave(here::here("figures/pca/mizzou_hairshed.pc1pc2.png"),
+       plot = pc1_pc2,
+       width = 8,
+       height = 5)
+```
+
+```{r, fig.width = 8, fig.height=5}
+pc3_pc4 <-
+  vec %>% 
+  arrange(map_breed) %>% 
+  mutate(map_breed = forcats::fct_inorder(map_breed),
+         map_breed = forcats::fct_relevel(map_breed, "Crossbred or other", after = Inf)) %>% 
+  ggplot(aes(x = PC3,
+             y = PC4)) +
+  geom_point(aes(color = map_breed),
+             alpha = 0.5) +
+  scale_color_manual(values = c("Crossbred or other" = "#a2ceaa",
+                                "Angus" = "#4f6980",
+                                "Hereford" = "#f47942",
+                                "Red Angus" = "#fbb04e",
+                                "Simmental" = "#638b66",
+                                "Brangus" = "#bfbb60",
+                                "Gelbvieh"= "#d7ce9f",
+                                "Charolais"= "#849db1",
+                                "Shorthorn"= "#b9aa97",
+                                "Maine-Anjou"= "#7e756d")) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_classic() +
+  theme(axis.title = element_text(size = 18),
+        axis.title.y = element_text(margin = margin(t = 0,
+                                                    r = 13,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.title.x = element_text(margin = margin(t = 13,
+                                                    r = 0,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.text = element_text(size = 14),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 14)) +
+  labs(x = str_c("PC 3: ", scales::percent(val[3] / sum(val))),
+       y = str_c("PC 4: ", scales::percent(val[4] / sum(val))),
+       color = str_wrap("Reported or inferred breed",
+                        width = 15))
+```
+
+```{r, fig.width = 8, fig.height=5}
+ggsave(here::here("figures/pca/mizzou_hairshed.pc3pc4.png"),
+       plot = pc3_pc4,
+       width = 8,
+       height = 5)
+```
+
+## Scree plot
+
+```{r, fig.width = 8, fig.height=3.5}
+scree <-
+  val %>% 
+  as_tibble() %>% 
+  mutate(pc = purrr::map_chr(.x = c(1:10),
+                             ~ glue("PC {.x}")),
+         pc = forcats::fct_inorder(as.factor(pc)),
+         pve = value/sum(value),
+         pve_label = scales::percent(value/sum(value),
+                                     accuracy = 1)) %>% 
+  ggplot(aes(x = pc, 
+             y = pve)) + 
+  geom_col() +
+  geom_text(aes(label = pve_label),
+            vjust = -0.5,
+            size = 3) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_classic() +
+  theme(axis.title = element_text(size = 14),
+        axis.title.y = element_text(margin = margin(t = 0,
+                                                    r = 13,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.title.x = element_blank(),
+        axis.text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45,
+                                   hjust = 1)) +
+  labs(x = NULL,
+       y = "Percent variation explained")
+```
+
+```{r, fig.width = 8, fig.height=5}
+ggsave(here::here("figures/pca/scree.png"),
+       plot = scree,
+       width = 8,
+       height = 3.5)
+```
+
+# Panel figure
+
+```{r, fig.width = 8, fig.height=11.5}
+pc1_pc2/scree + plot_layout(ncol = 1,
+              widths = c(1, 1),
+              heights = c(1, 0.6)) + plot_annotation(tag_levels = c("a")) & 
+  theme(plot.tag = element_text(size = 24),
+        plot.margin = margin(t = 0, b = 0, l = 0.75, r = 1, unit = "mm"))
+  
+```
+

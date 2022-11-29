@@ -1,0 +1,207 @@
+---
+title: "General model GWAS using SNP1101"
+author: "Harly Durbin"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(purrr)
+library(patchwork)
+library(magrittr)
+library(stringr)
+library(tidylog)
+library(tidyr)
+
+source(here::here("source_functions/hair_manhattan.R"))
+source(here::here("source_functions/ggqq.R"))
+source(here::here("source_functions/parse_loglik.R"))
+source(here::here("source_functions/lrt_calc.R"))
+source(here::here("source_functions/gcif.R"))
+```
+
+# Notes & questions
+
+SNP1101 output:
+
+* Column names in *_bvs.txt file: `SNPID, Chr, Pos, freq, g0, g1, g2, a, b, Var, F, p-value, FDR_GW`
+* Column names in *_bvs_p.txt file: `Chr, Pos, freq, b-value, Var, p-value`
+* `b` and `b-value` are beta/regression coefficient?
+* Guessing `g0`, `g1`, `g2` are number of individuals with genotypes 0, 1, 2
+* "`F` is F-test/F-ratio for variance comparison"
+* "`a` is intercept"
+* "`Var` is variance explained by the SNP. I don't remember exactly how I calculated it but I am sure the calculation is done SNP by SNP so if you sum them up the total variance should be much higher than observed variance. The proper variance can be calculated by direct inverse of LHS when all SNP fit together (computationally is not easy)."
+
+---
+
+Jerry pointed out that removing parent average during EBV de-regression removes the genetic trend. However, doing this results in inflated p-values. After some experimentation and comparing Q-Q plots, decided to use results WITHOUT parent average removed but to use genomic control to adjust the p-values. 
+
+# Setup
+
+```{r, warning = FALSE, message=FALSE}
+fixed9_snp1101 <-
+  read_table2(here::here("data/derived_data/snp1101/fixed9/out/gwas_ssr_fixed9_bvs_p.txt"))  %>%
+  janitor::clean_names() %>%
+  mutate(adj_p = gcif(df = .,
+                      adjust_p = TRUE,
+                      p_col = p_value),
+         q = qvalue::qvalue(adj_p)$qvalues,
+         neglog10q = -log10(q))
+  
+```
+
+```{r}
+# I can't remember numbers and have to re-calculate this every time so
+q_fdr5 <- -log10(.05)
+q_fdr1 <- -log10(.01)
+```
+
+# Diagnostic
+
+## Genomic control
+
+* Pre-GC inflation factor of `r fixed9_snp1101 %>% gcif(., p_col = p_value)`
+
+```{r}
+ggqq(pvector = fixed9_snp1101$p_value) +
+  ggtitle("PA NOT removed p-values (pre-GC)")
+```
+
+* Post-GC inflation factor of `r fixed9_snp1101 %>% gcif(., p_col = adj_p)`
+
+```{r}
+ggqq(pvector = fixed9_snp1101$adj_p) +
+  ggtitle("PA NOT removed p-values (post-GC)")
+```
+
+## Compare using DEBVs with and without parent average removed
+
+```{r}
+fixed9_snp1101 %>% 
+  select(chr, pos, adj_p) %>% 
+  left_join(read_table2(here::here("data/derived_data/snp1101/fixed9_PAremoved/out/gwas_ssr_fixed9_bvs_p.txt")) %>% 
+              select(chr = Chr, pos = Pos, p_value = `p-value`)) %>% 
+  summarise(`Correlation between p-values` = cor(adj_p, p_value))
+```
+
+## Does including first two PCs as fixed effect in the ssGBLUP model provide a better fit?
+
+* Issue: only included phenotypes for genotyped animals in `fixed15` model (can't have missing covariates in BLUPF90), so it isn't really an equal comparison to `fixed9` model. Compare instead to `fixed14` model, which only includes phenotypes for genotyped animals
+
+```{r}
+lrt_calc(ll_null = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed14/airemlf90.fixed14.log"),
+                                option = "logL"),
+         ll_test = parse_loglik(path = here::here("data/derived_data/aireml_varcomp/fixed15/airemlf90.fixed15.log"),
+                                option = "logL"))
+```
+
+# Summary/exploratory
+
+## Passing SNPs per chromosome at FDR = 5%
+
+```{r}
+fixed9_snp1101 %>% 
+  filter(neglog10q >= q_fdr5) %>% 
+  arrange(adj_p)
+```
+
+```{r}
+fixed9_snp1101 %>% 
+  filter(neglog10q >= q_fdr5) %>% 
+  mutate(all = n()) %>% 
+  group_by(chr) %>% 
+  summarise(n = n(),
+            pct = n()/all) %>% 
+  distinct() %>% 
+  arrange(desc(pct))
+```
+
+# Genome-wide results
+
+```{r, fig.width = 8, fig.height = 3}
+full_q <-
+  fixed9_snp1101 %>% 
+  hair_manhattan(y_var = neglog10q, 
+                 y_lab = latex2exp::TeX("$-log_{10}(q-value)$"),
+                 sigline = q_fdr1,
+                 color1 = "#b9aa97",
+                 color2 = "#7e756d") +
+  geom_hline(yintercept = q_fdr5, color = "blue")
+```
+
+```{r, fig.width=8, fig.height=3}
+full_q
+```
+
+```{r, fig.width = 11, fig.height = 6.1, eval=FALSE}
+ggsave(plot = full_q,
+       filename = here::here("figures/general_gwas/fixed9_snp1101.q_fdr.unkparents.png"),
+       height = 3,
+       width = 8)
+```
+
+# Chromosme 5 zoom-in
+
+```{r}
+full_q_chr5 <-
+  fixed9_snp1101 %>% 
+  filter(chr == 5) %>%
+  filter(50000000 >= pos) %>% 
+  ggplot(aes(x = pos,
+             y = neglog10q)) +
+  geom_point(color = "#b9aa97",
+             alpha = 0.75) +
+  scale_x_continuous(breaks = c(0, 10000000, 20000000, 30000000, 40000000, 50000000),
+                     labels = c("0 Mb", "10 Mb", "20 Mb", "30 Mb", "40 Mb", "50 Mb")) +
+  theme_classic() +
+  theme(axis.title = element_text(size = 18),
+        axis.title.y = element_text(margin = margin(t = 0,
+                                                    r = 13,
+                                                    b = 0,
+                                                    l = 0)),
+        axis.text = element_text(size = 14),
+        legend.text = element_text(size = 14),
+        axis.title.x = element_blank()) +
+  labs(x = NULL,
+       y = latex2exp::TeX("$-log_{10}(q-value)$"),
+       title = NULL) +
+  geom_hline(yintercept = q_fdr1,
+             color = "red",
+             size = 0.5) +
+  geom_hline(yintercept = q_fdr5,
+             color = "blue",
+             size = 0.5)
+```
+
+```{r, fig.width=3, fig.height=3}
+full_q_chr5
+```
+
+```{r, eval=FALSE}
+ggsave(filename = here::here("figures/general_gwas/full_q_chr5.unkparents.png"),
+       plot = full_q_chr5, 
+       width = 8,
+       height = 3)
+```
+
+## Panel figure
+
+```{r, fig.width=8, fig.height=6, eval = FALSE}
+
+
+full_q/full_q_chr5 + plot_annotation(tag_levels = c("a")) & 
+  theme(plot.tag = element_text(size = 24),
+        plot.margin = margin(t = 0, b = 0, l = 0.75, r = 1, unit = "mm"))
+
+ggsave(filename = here::here("figures/general_gwas/panel.q.png"), height = 6, width = 8) 
+
+```
+

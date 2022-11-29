@@ -1,0 +1,27 @@
+{
+    "__default__":
+    {
+        "p" : "BioCompute,htc4,hpc5",
+        "account" : "animalsci",
+        "mem" : 1G,
+        "c": 1,
+        "t": "01:00:00",
+        "o": "log/slurm_out/snp1101/{rule}/{wildcards}.%j.out",
+        "mail-user" : "hjdurbin@mail.missouri.edu",
+        "mail-type" : "NONE"
+    },
+    "setup_snp1101":
+    {
+        "t": "01:00:00",
+        "mem" : 6G,
+        "p" : "General,Lewis,BioCompute,htc4,hpc5"
+    },
+    "snp1101":
+    {
+        "t": "3:30:00",
+        "p" : "BioCompute,htc4,hpc5",
+        "mem" : 100G,
+        "c": 32,
+        "mail-type" : "END"
+    }
+}

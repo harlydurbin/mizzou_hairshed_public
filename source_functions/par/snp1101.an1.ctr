@@ -1,0 +1,39 @@
+title
+       "an1";
+
+gfile
+       "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/data/derived_data/aireml_varcomp/an1/genotypes.an1.txt";
+
+mapfile
+       "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/data/raw_data/geno_dump/200924_HairShed.850K.chrinfo.txt";
+
+//pedfile
+      //"/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/data/derived_data/snp1101/an1/ped.an1.txt";
+
+traitfile
+       name "an1_bvs"
+       file "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/data/derived_data/snp1101/an1/trait.txt"
+       est 1
+       skip 1;
+
+qc
+       maf_range 0.0 0.5;
+
+//kinship
+       //matrix
+       //name "an1"
+       //method vanraden;
+
+gwas ssr
+       kinship file "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/data/derived_data/snp1101/gmtx_an1.bin"
+       wt rel
+       maf_range 0.0 0.5
+       mca gwise fdr
+       plot
+       plot qq;
+
+nthread
+       32;
+
+output_folder
+       "/storage/hpc/group/UMAG/WORKING/hjdzpd/mizzou_hairshed/data/derived_data/snp1101/an1/out";
